@@ -6,34 +6,71 @@ from typing import List, Dict, Any
 from PIL import Image
 
 EXTRACTION_SYSTEM_PROMPT = """
-You are an expert document OCR assistant.
-CRITICAL: Output ONLY a valid JSON object starting with { and ending with }.
-NO thinking, NO reasoning, NO introductory text, NO markdown fences. Start directly with { and end with }.
+You are an expert document OCR assistant for Russian civil contracts (GPH).
+You are given photos of a courier's documents: passport, work permit (VNZh/patent), registration stamp, INN certificate, SNILS, and bank details.
+
+CRITICAL INSTRUCTION:
+Output ONLY a raw valid JSON object starting directly with { and ending with }.
+NO thinking process, NO introductory text, NO markdown formatting.
 
 Format:
 {
-    "fio": "Фамилия Имя Отчество полностью на русском языке (например, Муртузалиев Зия Азер оглу)",
-    "citizenship": "гражданство в родительном падеже (например, 'республики Азербайджан', 'республики Таджикистан', 'Российской Федерации')",
-    "birth_date": "дата рождения в формате ДД.ММ.ГГГГ (например, 21.08.1996)",
-    "birth_place": "место рождения (например, Азербайджан, Таджикистан)",
-    "passport_str": "наименование документа, серия, номер и дата выдачи (например, 'паспорт C05216090, выдан 26.07.2024')",
-    "work_doc_full": "основание для ведения трудовой деятельности для преамбулы (например, 'Вид На Жительство иностранного гражданина 83№1110247, выдан 16.07.2025' или 'Патент 78 № 1234567, выдан 01.02.2025')",
-    "work_doc_table": "основание для раздела реквизитов (например, 'Вид На Жительство иностранного гражданина: 83№1110247')",
-    "stay_basis": "основание для п. 5 договора (например, 'Вида На Жительство иностранного гражданина 83№1110247')",
-    "stay_issuer": "кем выдан документ пребывания для п. 5 (например, 'ГУ МВД России по г. Санкт-Петербургу и Ленинградской области, дата выдачи документа 16.07.2025')",
-    "reg_address": "полный адрес регистрации со штампа (например, 'г. Санкт-Петербург, ул. Верхне-Каменская, дом 5, стр. 1, кв. 1163')",
-    "inn": "номер ИНН (12 цифр, например, 781462655959)",
-    "snils": "номер СНИЛС (например, 226-813-876 84)",
-    "bik": "БИК банка курьера",
-    "rs": "расчетный счет курьера 20 цифр",
-    "ks": "корреспондентский счет банка 20 цифр"
+    "fio": "Фамилия Имя Отчество полностью на русском языке (например, Абдунабиев Садамбек Зафарович)",
+    "citizenship": "гражданство в родительном падеже (например, 'республики Таджикистан', 'республики Узбекистан', 'Российской Федерации')",
+    "birth_date": "дата рождения ДД.ММ.ГГГГ (например, 19.12.1996)",
+    "birth_place": "место рождения (например, Таджикистан, Узбекистан)",
+    "passport_str": "документ удостоверяющий личность с серией/номером и датой выдачи (например, 'паспорт 403106091, выдан 07.07.2020')",
+    "work_doc_full": "основание для работы (например, 'Вид На Жительство иностранного гражданина 83№1107116, выдан 11.04.2025' или 'Патент 78 № 1234567, выдан 01.02.2025')",
+    "work_doc_table": "основание для таблицы реквизитов (например, 'Вид На Жительство иностранного гражданина: 83№1107116')",
+    "stay_basis": "основание для п. 5 договора (например, 'Вида На Жительство иностранного гражданина 83№1107116')",
+    "stay_issuer": "кем выдан документ пребывания для п. 5 (например, 'ГУ МВД России по г. Санкт-Петербургу и Ленинградской области, дата выдачи документа 11.04.2025')",
+    "reg_address": "полный адрес регистрации со штампа (например, 'г. Санкт-Петербург, пр.Сизова дом 32, корп. 1 лит Б, кв.568')",
+    "inn": "номер ИНН 12 цифр (например, 780458282597)",
+    "snils": "номер СНИЛС (например, 212-101-038-64)",
+    "bik": "БИК банка 9 цифр (например, 044030653)",
+    "rs": "расчетный счет 20 цифр (например, 40820810755170726650)",
+    "ks": "корреспондентский счет 20 цифр (начинается на 301...)"
 }
 
-Attention:
-If a field is not visible on the photos, leave it as empty string "".
-Never invent data, extract strictly what is visible.
-Output MUST be raw valid JSON only.
+Rules:
+1. If a document is missing in the photos, leave its fields as empty string "".
+2. Read all text, stamps, numbers carefully.
+3. Start output with { and end with }.
 """
+
+def enrich_data(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return {}
+        
+    bp = (data.get('birth_place') or '').lower()
+    cit = (data.get('citizenship') or '').strip()
+    if not cit:
+        if 'таджик' in bp:
+            data['citizenship'] = 'республики Таджикистан'
+        elif 'узбек' in bp:
+            data['citizenship'] = 'республики Узбекистан'
+        elif 'азерб' in bp:
+            data['citizenship'] = 'республики Азербайджан'
+        elif 'кыргыз' in bp or 'киргиз' in bp:
+            data['citizenship'] = 'Кыргызской Республики'
+        elif 'росси' in bp or 'рф' in bp or 'ленинград' in bp or 'москв' in bp:
+            data['citizenship'] = 'Российской Федерации'
+        
+    wdf = (data.get('work_doc_full') or '').strip()
+    if wdf:
+        if not data.get('work_doc_table'):
+            data['work_doc_table'] = wdf
+        if not data.get('stay_basis'):
+            if 'вид на жительство' in wdf.lower():
+                data['stay_basis'] = 'Вида На Жительство ' + re.sub(r'(?i)вид на жительство\s*', '', wdf).strip()
+            elif 'патент' in wdf.lower():
+                data['stay_basis'] = 'патента ' + re.sub(r'(?i)патент\s*', '', wdf).strip()
+            else:
+                data['stay_basis'] = wdf
+        if not data.get('stay_issuer'):
+            data['stay_issuer'] = 'ГУ МВД России по г. Санкт-Петербургу и Ленинградской области'
+            
+    return data
 
 def parse_json_safely(raw_text: str) -> Dict[str, Any]:
     if not raw_text or not isinstance(raw_text, str):
@@ -41,7 +78,6 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
         
     cleaned = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
     
-    # 1. Попытка стандартного JSON парсинга
     start_idx = cleaned.find("{")
     end_idx = cleaned.rfind("}")
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -49,17 +85,16 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
         try:
             res = json.loads(candidate)
             if isinstance(res, dict) and any(res.values()):
-                return res
+                return enrich_data(res)
         except Exception:
             candidate_clean = re.sub(r',\s*([\]}])', r'\1', candidate)
             try:
                 res = json.loads(candidate_clean)
                 if isinstance(res, dict) and any(res.values()):
-                    return res
+                    return enrich_data(res)
             except Exception:
                 pass
 
-    # 2. Неубиваемый Regex-парсер каждого поля (вытаскивает данные даже из текста с размышлениями)
     data = {}
     fields = [
         "fio", "citizenship", "birth_date", "birth_place", "passport_str",
@@ -67,14 +102,14 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
         "reg_address", "inn", "snils", "bik", "rs", "ks"
     ]
     for field in fields:
-        m = re.search(rf'[\"\']?{field}[\"\']?\s*[:=]\s*[\"\']([^\"\'\n\r}}]+)[\"\']', raw_text, re.IGNORECASE)
+        m = re.search(rf'[\"\']?{field}[\"\']?\s*[:=]\s*[\"\']([^\"\'\r\n}}]+)[\"\']', raw_text, re.IGNORECASE)
         if m:
             val = m.group(1).strip()
             if val.lower() not in ["null", "none"]:
                 data[field] = val
 
     if data.get("fio") or data.get("passport_str") or data.get("inn") or data.get("snils") or data.get("work_doc_full"):
-        return data
+        return enrich_data(data)
         
     return None
 
@@ -99,19 +134,12 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
         timeout=45.0
     )
     
-    unique_paths = []
-    seen_sizes = set()
-    for p in image_paths:
-        try:
-            sz = os.path.getsize(p)
-            if sz not in seen_sizes:
-                seen_sizes.add(sz)
-                unique_paths.append(p)
-        except Exception:
-            unique_paths.append(p)
+    valid_paths = [p for p in image_paths if os.path.exists(p)]
+    if not valid_paths:
+        raise ValueError("Нет доступных изображений для обработки.")
 
-    content = [{"type": "text", "text": "Extract courier document data strictly into JSON."}]
-    for img_path in unique_paths:
+    content = [{"type": "text", "text": "Extract all courier document data strictly into JSON."}]
+    for img_path in valid_paths:
         try:
             with Image.open(img_path) as img:
                 img.thumbnail((1200, 1200))
