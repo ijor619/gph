@@ -521,30 +521,35 @@ async def check_rkl_callback(callback: types.CallbackQuery, state: FSMContext):
         return
 
     data = session["extracted_data"]
-    fio = data.get("fio", "").strip()
-    parts = fio.split()
-    last_name = parts[0] if len(parts) > 0 else "—"
-    first_name = parts[1] if len(parts) > 1 else "—"
-    patronymic = parts[2] if len(parts) > 2 else ""
+    fio = (data.get("fio") or "—").strip()
+    bdate = (data.get("birth_date") or "—").strip()
+    pass_str = (data.get("passport_str") or "—").strip()
     
-    bdate = data.get("birth_date", "—")
-    pass_str = data.get("passport_str", "—")
-    
-    # Извлекаем номер паспорта (цифры/буквы серии и номера)
-    m_pass = re.search(r'(?:паспорт\s*)?([A-Z0-9]{6,12})', pass_str, re.IGNORECASE)
-    pass_num = m_pass.group(1) if m_pass else pass_str
+    # 1. Извлекаем дату выдачи паспорта
+    issue_date = (data.get("passport_issue_date") or "").strip()
+    if not issue_date or issue_date == "—":
+        m_date = re.search(r'\b(\d{2}[./-]\d{2}[./-]\d{4})\b', pass_str)
+        if m_date:
+            issue_date = m_date.group(1).replace('/', '.').replace('-', '.')
+        else:
+            issue_date = "—"
+
+    # 2. Извлекаем серию и номер паспорта (очищаем от даты и лишних слов)
+    s_clean = pass_str
+    if issue_date and issue_date != "—":
+        s_clean = s_clean.replace(issue_date, "")
+    s_clean = re.sub(r'(?i)\b(паспорт|выдан|серия|серии|номер|от|г\.?)\b', '', s_clean)
+    s_clean = re.sub(r'[№,:;]', '', s_clean).strip()
+    s_clean = re.sub(r'\s+', ' ', s_clean).strip()
+    pass_num = s_clean or "—"
 
     text = (
         "👮‍♂️ <b>Данные курьера для проверки в Реестре контролируемых лиц (РКЛ МВД):</b>\n\n"
         "💡 <i>Нажмите на значение в рамке, чтобы скопировать его в 1 клик для вставки на сайт МВД:</i>\n\n"
-        f"• <b>Фамилия:</b> <code>{html.escape(last_name)}</code>\n"
-        f"• <b>Имя:</b> <code>{html.escape(first_name)}</code>\n"
-    )
-    if patronymic:
-        text += f"• <b>Отчество:</b> <code>{html.escape(patronymic)}</code>\n"
-    text += (
+        f"• <b>ФИО:</b> <code>{html.escape(fio)}</code>\n"
         f"• <b>Дата рождения:</b> <code>{html.escape(bdate)}</code>\n"
-        f"• <b>Серия и номер документа:</b> <code>{html.escape(pass_num)}</code>\n\n"
+        f"• <b>Серия и номер документа:</b> <code>{html.escape(pass_num)}</code>\n"
+        f"• <b>Дата выдачи документа:</b> <code>{html.escape(issue_date)}</code>\n\n"
         "🌐 <i>Перейдите на официальный сайт МВД России по кнопке ниже:</i>"
     )
 
