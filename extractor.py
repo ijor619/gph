@@ -1,316 +1,75 @@
 import json
 import base64
 import os
-import re
-import socket
-import urllib.request
-import urllib.error
-import logging
-from io import BytesIO
 from typing import List, Dict, Any
-from PIL import Image, ImageFile
 
-logger = logging.getLogger("extractor")
+EXTRACTION_SYSTEM_PROMPT = """
+Ты — профессиональный ассистент по распознаванию документов для заключения договоров ГПХ (гражданско-правового характера) с курьерами.
+Тебе на вход передаются фото документов курьера (паспорт иностранного гражданина или РФ, вид на жительство (ВНЖ) / патент / РВП, штамп регистрации по месту жительства / пребывания, свидетельство ИНН, СНИЛС, банковские реквизиты).
 
-# Разрешаем загрузку неполных/сжатых Telegram изображений
-ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-EXTRACTION_PROMPT = """
-Ты — профессиональный ассистент по распознаванию документов курьеров для заключения договоров ГПХ.
-Тебе переданы фото документов: паспорт, ВНЖ / патент / РВП, штамп регистрации, ИНН, СНИЛС, банковские реквизиты.
-
-Извлеки точные данные и верни ТОЛЬКО чистый валидный JSON:
+Твоя задача — извлечь точные данные и вернуть ТОЛЬКО валидный JSON со следующей структурой:
 {
-    "fio": "Фамилия Имя Отчество полностью на русском языке (например, Абдунабиев Садамбек Зафарович)",
-    "citizenship": "гражданство в родительном падеже (например, 'республики Таджикистан', 'республики Азербайджан', 'республики Узбекистан', 'Российской Федерации')",
-    "birth_date": "дата рождения ДД.ММ.ГГГГ (например, 19.12.1996)",
-    "birth_place": "место рождения (например, Таджикистан, Азербайджан)",
-    "passport_str": "документ удостоверяющий личность с серией/номером и датой выдачи (например, 'паспорт 403106091, выдан 07.07.2020')",
-    "work_doc_full": "основание для ведения трудовой деятельности для преамбулы (например, 'Вид На Жительство иностранного гражданина 83№1107116, выдан 11.04.2025' или 'Патент 78 № 1234567, выдан 01.02.2025')",
-    "work_doc_table": "основание для таблицы реквизитов (например, 'Вид На Жительство иностранного гражданина: 83№1107116')",
-    "stay_basis": "основание для п. 5 договора (например, 'Вида На Жительство иностранного гражданина 83№1107116')",
-    "stay_issuer": "кем выдан документ пребывания для п. 5 (например, 'ГУ МВД России по г. Санкт-Петербургу и Ленинградской области, дата выдачи документа 11.04.2025')",
-    "reg_address": "полный адрес регистрации со штампа (например, 'г. Санкт-Петербург, пр.Сизова дом 32, корп. 1 лит Б, кв.568')",
-    "inn": "номер ИНН 12 цифр (например, 780458282597)",
-    "snils": "номер СНИЛС (например, 212-101-038-64)",
-    "bik": "БИК банка 9 цифр (например, 044030653)",
-    "rs": "расчетный счет 20 цифр (например, 40820810755170726650)",
-    "ks": "корреспондентский счет 20 цифр (начинается на 301...)"
+    "fio": "Фамилия Имя Отчество полностью на русском языке (например, Муртузалиев Зия Азер оглу)",
+    "citizenship": "гражданство в родительном падеже (например, 'республики Азербайджан', 'республики Таджикистан', 'республики Узбекистан', 'Российской Федерации')",
+    "birth_date": "дата рождения в формате ДД.ММ.ГГГГ (например, 21.08.1996)",
+    "birth_place": "место рождения (например, Азербайджан, Таджикистан, г. Ленинград)",
+    "passport_str": "наименование документа, серия, номер и дата выдачи (например, 'паспорт C05216090, выдан 26.07.2024')",
+    "work_doc_full": "основание для ведения трудовой деятельности для преамбулы (например, 'Вид На Жительство иностранного гражданина 83№1110247, выдан 16.07.2025' или 'Патент 78 № 1234567, выдан 01.02.2025')",
+    "work_doc_table": "основание для раздела реквизитов (например, 'Вид На Жительство иностранного гражданина: 83№1110247' или 'Патент: 78 № 1234567')",
+    "stay_basis": "основание для п. 5 договора (например, 'Вида На Жительство иностранного гражданина 83№1110247' или 'патента 78 № 1234567')",
+    "stay_issuer": "кем выдан документ пребывания для п. 5 (например, 'ГУ МВД России по г. Санкт-Петербургу и Ленинградской области, дата выдачи документа 16.07.2025')",
+    "reg_address": "полный адрес регистрации со штампа (например, 'г. Санкт-Петербург, ул. Верхне-Каменская, дом 5, стр. 1, кв. 1163')",
+    "inn": "номер ИНН (12 цифр для физлиц, например, 781462655959)",
+    "snils": "номер СНИЛС (например, 226-813-876 84)",
+    "bik": "БИК банка курьера (или пустая строка если нет)",
+    "rs": "расчетный счет курьера 20 цифр (или пустая строка если нет)",
+    "ks": "корреспондентский счет банка 20 цифр (или пустая строка если нет)"
 }
+
 Внимание:
-1. Если какого-то поля на фото нет — оставь пустую строку "".
+1. Если какого-то поля на фото нет (например, банковских реквизитов), оставь поле пустым "" или "(заполнить)".
 2. Не придумывай данные, бери строго то, что видно на фотографиях.
-3. Верни ТОЛЬКО JSON без каких-либо markdown-символов.
+3. Верни ТОЛЬКО чистый JSON, без markdown-кавычек и пояснений.
 """
 
-def clean_val(val: str) -> str:
-    if not val:
-        return ""
-    val = val.strip().strip('"').strip("'")
-    if "=" in val:
-        val = val.split("=", 1)[1].strip().strip('"').strip("'")
-    return val
+def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dict[str, Any]:
+    """
+    Распознает комплект фото документов с помощью Vision API.
+    Если api_key не передан, ищет OPENAI_API_KEY в окружении.
+    """
+    api_key = api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("Не указан OPENAI_API_KEY. Укажите его в .env или передайте в функцию.")
 
-def safe_load_image(path: str) -> Image.Image:
-    """Безопасная загрузка изображения с защитой от broken data stream"""
-    with Image.open(path) as img:
-        img.load()
-        if img.mode != "RGB":
-            return img.convert("RGB")
-        return img.copy()
-
-def image_to_clean_base64(path: str) -> str:
-    """Конвертирует изображение в легковесный Base64 JPEG для быстрой передачи по сети"""
     try:
-        img = safe_load_image(path)
-        # 1400px идеально сохраняет мелкий шрифт документов и штампов, но весит в 10 раз меньше
-        max_size = 1400
-        if max(img.size) > max_size:
-            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=75, optimize=True)
-        return base64.b64encode(buf.getvalue()).decode("utf-8")
-    except Exception:
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-
-def parse_json_from_response(raw_text: str) -> Dict[str, Any]:
-    """Надежный парсер JSON из ответа нейросети с очисткой markdown-тегов"""
-    text = raw_text.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    elif text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    text = text.strip()
-    
-    start_idx = text.find("{")
-    end_idx = text.rfind("}")
-    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-        text = text[start_idx:end_idx + 1]
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
         
-    return json.loads(text)
-
-def get_available_gemini_models(gemini_key: str) -> List[str]:
-    """Динамический опрос списка доступных моделей у Google для конкретного API-ключа"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            models = []
-            for m in data.get("models", []):
-                methods = m.get("supportedGenerationMethods", [])
-                if "generateContent" in methods:
-                    name = m.get("name", "").replace("models/", "")
-                    models.append(name)
-            
-            flash_models = [m for m in models if "flash" in m.lower()]
-            other_models = [m for m in models if "flash" not in m.lower()]
-            found = flash_models + other_models
-            if found:
-                logger.info(f"Обнаружены доступные модели Gemini: {found[:4]}")
-                return found
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="ignore")
-        if "API_KEY_INVALID" in error_body or "not valid" in error_body:
-            raise RuntimeError("Неверный ключ Gemini API. Проверьте GEMINI_API_KEY в переменных Bothost.")
-        if "location is not supported" in error_body:
-            raise RuntimeError("Google блокирует доступ с IP-адресов РФ. Подключите ProxyAPI (proxyapi.ru) или OpenRouter.")
-    except Exception as e:
-        logger.warning(f"Не удалось получить список моделей Gemini: {e}")
-
-    return [
-        "gemini-flash-latest",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-preview",
-        "gemini-3.8-flash",
-        "gemini-2.0-flash-exp",
-        "gemini-1.5-flash-latest",
-        "gemini-flash-lite-latest"
-    ]
-
-def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any]:
-    """Распознавание через Google Gemini Flash с быстрым таймаутом (12 сек)"""
-    parts = [{"text": EXTRACTION_PROMPT}]
-    valid_images_count = 0
-    for p in image_paths:
-        try:
-            b64_str = image_to_clean_base64(p)
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": b64_str
-                }
-            })
-            valid_images_count += 1
-        except Exception as e:
-            logger.warning(f"Файл {p} пропущен: {e}")
-
-    if valid_images_count == 0:
-        raise ValueError("Не удалось прочитать ни одного изображения из отправленных.")
-
-    payload = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {
-            "temperature": 0.0,
-            "responseMimeType": "application/json"
-        }
-    }
-    encoded_payload = json.dumps(payload).encode("utf-8")
-
-    candidate_models = get_available_gemini_models(gemini_key)
-    last_err_details = None
-
-    for model_name in candidate_models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
-        req = urllib.request.Request(
-            url,
-            data=encoded_payload,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        try:
-            # Быстрый таймаут 12 сек: не ждем минутами, если Google блокирует IP хостинга
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-                text = result["candidates"][0]["content"]["parts"][0]["text"]
-                return parse_json_from_response(text)
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="ignore")
-            last_err_details = f"HTTP {e.code}: {error_body}"
-            
-            if "API_KEY_INVALID" in error_body or "not valid" in error_body:
-                raise RuntimeError("Неверный ключ Gemini API. Проверьте правильность GEMINI_API_KEY.")
-            if "location is not supported" in error_body:
-                raise RuntimeError("Google блокирует доступ с IP-серверов РФ. Подключите ProxyAPI (proxyapi.ru) или OpenRouter.")
-            
-            if e.code == 404:
-                logger.info(f"Модель {model_name} вернула 404, пробуем следующую...")
-                continue
-            raise RuntimeError(f"Ошибка Google Gemini: {last_err_details}")
-        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-            last_err_details = f"Таймаут подключения к Google: {e}"
-            logger.warning(f"Сетевой таймаут к Google ({e}). Домен недоступен с IP хостинга.")
-            # Если домен Google заблокирован по сети, перебор остальных моделей к этому же хосту бессмыслен
-            break
-        except Exception as e:
-            last_err_details = str(e)
-            continue
-
-    # Запасная попытка через OpenAI-совместимый эндпоинт Google
-    try:
-        openai_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        openai_content = [{"type": "text", "text": EXTRACTION_PROMPT}]
-        for p in image_paths:
-            try:
-                b64 = image_to_clean_base64(p)
-                openai_content.append({
+        content = [{"type": "text", "text": "Распознай данные документов курьера и сформируй JSON."}]
+        for img_path in image_paths:
+            with open(img_path, "rb") as img_file:
+                b64 = base64.b64encode(img_file.read()).decode("utf-8")
+                mime = "image/jpeg" if img_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+                content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                    "image_url": {
+                        "url": f"data:{mime};base64,{b64}",
+                        "detail": "high"
+                    }
                 })
-            except Exception:
-                pass
         
-        oa_payload = json.dumps({
-            "model": "gemini-flash-latest",
-            "messages": [{"role": "user", "content": openai_content}],
-            "temperature": 0.0
-        }).encode("utf-8")
-        
-        oa_req = urllib.request.Request(
-            openai_url,
-            data=oa_payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {gemini_key}"
-            },
-            method="POST"
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": content}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0
         )
-        with urllib.request.urlopen(oa_req, timeout=12) as resp:
-            oa_res = json.loads(resp.read().decode("utf-8"))
-            oa_text = oa_res["choices"][0]["message"]["content"]
-            return parse_json_from_response(oa_text)
+        
+        res_text = response.choices[0].message.content
+        return json.loads(res_text)
     except Exception as e:
-        logger.warning(f"Google OpenAI-compatible endpoint error: {e}")
-
-    raise RuntimeError(
-        f"Серверы Google Gemini не отвечают с IP-адреса хостинга Bothost (РФ).\n"
-        f"Детали ошибки: {last_err_details}\n\n"
-        "💡 **Решение для серверов в РФ (займет 1 минуту):**\n"
-        "Подключите шлюз ProxyAPI (https://proxyapi.ru) с бесплатным приветственным балансом:\n"
-        "1. Укажите OPENAI_API_KEY=ваш_ключ_от_proxyapi\n"
-        "2. Укажите OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
-        "После этого распознавание заработает за 4–6 секунд!"
-    )
-
-def extract_via_openai(image_paths: List[str], api_key: str, base_url: str = None) -> Dict[str, Any]:
-    """Распознавание через OpenAI / ProxyAPI / OpenRouter"""
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=25.0)
-    
-    model_name = clean_val(os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
-    
-    content = [{"type": "text", "text": "Распознай данные документов курьера и верни структурированный JSON."}]
-    for img_path in image_paths:
-        try:
-            b64 = image_to_clean_base64(img_path)
-            content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{b64}",
-                    "detail": "high"
-                }
-            })
-        except Exception:
-            pass
-    
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": EXTRACTION_PROMPT},
-            {"role": "user", "content": content}
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.0
-    )
-    raw_content = response.choices[0].message.content
-    return parse_json_from_response(raw_content)
-
-def extract_data_from_images(image_paths: List[str]) -> Dict[str, Any]:
-    """Главная точка входа для извлечения данных из документов"""
-    gemini_key = clean_val(os.getenv("GEMINI_API_KEY", ""))
-    openai_key = clean_val(os.getenv("OPENAI_API_KEY", ""))
-    base_url = clean_val(os.getenv("OPENAI_BASE_URL", "")) or None
-    
-    errors = []
-    
-    if gemini_key:
-        try:
-            return extract_via_gemini(image_paths, gemini_key)
-        except Exception as e:
-            logger.warning(f"Ошибка Gemini: {e}")
-            errors.append(f"Gemini: {e}")
-
-    if openai_key.startswith("http://") or openai_key.startswith("https://"):
-        if not base_url:
-            base_url = openai_key
-        openai_key = ""
-
-    if openai_key:
-        try:
-            return extract_via_openai(image_paths, openai_key, base_url)
-        except Exception as e:
-            logger.warning(f"Ошибка OpenAI/Proxy: {e}")
-            errors.append(f"OpenAI/Proxy: {e}")
-
-    if errors:
-        raise RuntimeError("\n".join(errors))
-
-    raise RuntimeError(
-        "Не задан ключ распознавания в переменных окружения!\n\n"
-        "1. Для ProxyAPI (рекомендуется для РФ): добавьте OPENAI_API_KEY и OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
-        "2. Для OpenRouter: добавьте OPENAI_API_KEY и OPENAI_BASE_URL=https://openrouter.ai/api/v1\n"
-        "3. Для Gemini: добавьте GEMINI_API_KEY (бесплатный на https://aistudio.google.com)"
-    )
+        print(f"Error calling Vision API: {e}")
+        raise
