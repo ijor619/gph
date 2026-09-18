@@ -1,6 +1,7 @@
 import json
 import base64
 import os
+import re
 from typing import List, Dict, Any
 
 EXTRACTION_SYSTEM_PROMPT = """
@@ -32,16 +33,38 @@ EXTRACTION_SYSTEM_PROMPT = """
 3. Верни ТОЛЬКО чистый JSON, без markdown-кавычек и пояснений.
 """
 
+def clean_env_var(val: str) -> str:
+    if not val:
+        return ""
+    val = val.strip().strip('"').strip("'")
+    if "=" in val:
+        val = val.split("=", 1)[1].strip().strip('"').strip("'")
+    return val
+
 def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dict[str, Any]:
     """
     Распознает комплект фото документов с помощью Vision API.
     Поддерживает стандартный OpenAI API или прокси (OPENAI_BASE_URL).
     """
-    api_key = api_key or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL") or None
+    raw_key = api_key or os.getenv("OPENAI_API_KEY", "")
+    raw_base = os.getenv("OPENAI_BASE_URL", "")
+
+    api_key = clean_env_var(raw_key)
+    base_url = clean_env_var(raw_base) or None
+
+    # Защита от перепутанных полей (если URL попал в ключ)
+    if api_key.startswith("http://") or api_key.startswith("https://"):
+        if not base_url:
+            base_url = api_key
+        api_key = ""
 
     if not api_key:
-        raise ValueError("Не указан OPENAI_API_KEY. Задайте его в .env или в панели Bothost.")
+        raise ValueError(
+            "Не указан или некорректно заполнен OPENAI_API_KEY!\n"
+            "Проверьте переменные окружения на Bothost:\n"
+            "• OPENAI_API_KEY должен содержать ключ (начинается на sk- или ключ от ProxyAPI)\n"
+            "• OPENAI_BASE_URL должен содержать только URL (например, https://api.proxyapi.ru/openai/v1), а не ключ!"
+        )
 
     from openai import OpenAI
     client = OpenAI(api_key=api_key, base_url=base_url)
