@@ -33,6 +33,30 @@ EXTRACTION_SYSTEM_PROMPT = """
 3. Верни ТОЛЬКО чистый JSON, без markdown-кавычек и пояснений.
 """
 
+def parse_json_safely(raw_text: str) -> Dict[str, Any]:
+    if not raw_text or not isinstance(raw_text, str):
+        return None
+    text = raw_text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+    
+    start_idx = text.find("{")
+    end_idx = text.rfind("}")
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        text = text[start_idx:end_idx + 1]
+    else:
+        return None
+        
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
 def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dict[str, Any]:
     api_key = api_key or os.getenv("OPENAI_API_KEY", "")
     if not api_key:
@@ -45,16 +69,13 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     base_url = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
     if api_key.startswith("sk-or-"):
         base_url = "https://openrouter.ai/api/v1"
-        
-    model = os.getenv("OPENAI_MODEL", "openrouter/free")
-    if api_key.startswith("sk-or-") and (not model or "gpt" in model):
-        model = "openrouter/free"
 
     from openai import OpenAI
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
-        default_headers={"HTTP-Referer": "https://bothost.ru", "X-Title": "Courier Bot"}
+        default_headers={"HTTP-Referer": "https://bothost.ru", "X-Title": "Courier Bot"},
+        timeout=45.0
     )
     
     content = [{"type": "text", "text": "Распознай данные документов курьера и верни структурированный JSON."}]
@@ -78,31 +99,45 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
             }
         })
     
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": content}
-        ],
-        temperature=0.0,
-        max_tokens=800
-    )
+    messages = [
+        {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+        {"role": "user", "content": content}
+    ]
+
+    configured_model = os.getenv("OPENAI_MODEL", "").strip()
+    if api_key.startswith("sk-or-"):
+        models_to_try = [
+            configured_model if configured_model and "gpt" not in configured_model else "google/gemma-4-26b-a4b-it:free",
+            "qwen/qwen3.8-27b:free",
+            "openrouter/free"
+        ]
+        models_to_try = [m for i, m in enumerate(models_to_try) if m and m not in models_to_try[:i]]
+    else:
+        models_to_try = [configured_model or "gpt-4o-mini"]
+
+    last_raw_response = ""
+    for model_name in models_to_try:
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=2000
+            )
+            msg = response.choices[0].message
+            res_text = getattr(msg, "content", None) or getattr(msg, "reasoning", None) or ""
+            last_raw_response = res_text
+            
+            parsed = parse_json_safely(res_text)
+            if parsed and isinstance(parsed, dict) and (parsed.get("fio") or parsed.get("passport_str") or parsed.get("inn")):
+                return parsed
+        except Exception as e:
+            err_msg = str(e)
+            if "402" in err_msg or "credits" in err_msg:
+                continue
+            pass
+
+    if last_raw_response:
+        raise ValueError(f"Модель ответила текстом вместо JSON: {last_raw_response[:200]}")
     
-    msg = response.choices[0].message
-    res_text = getattr(msg, "content", None) or getattr(msg, "reasoning", None) or ""
-    
-    res_text = res_text.strip()
-    if res_text.startswith("```json"):
-        res_text = res_text[7:]
-    elif res_text.startswith("```"):
-        res_text = res_text[3:]
-    if res_text.endswith("```"):
-        res_text = res_text[:-3]
-    res_text = res_text.strip()
-    
-    start_idx = res_text.find("{")
-    end_idx = res_text.rfind("}")
-    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-        res_text = res_text[start_idx:end_idx + 1]
-        
-    return json.loads(res_text)
+    raise ValueError("Не удалось распознать документы. Попробуйте отправить фото курьера еще раз.")
