@@ -434,7 +434,13 @@ async def process_photos_callback(callback: types.CallbackQuery, state: FSMConte
     await callback.answer()
 
     try:
-        data = extract_data_from_images(session["photos"])
+        await bot.send_chat_action(chat_id=callback.message.chat.id, action="typing")
+    except Exception:
+        pass
+
+    try:
+        # Запускаем в отдельном потоке, чтобы сетевые запросы не замораживали бота
+        data = await asyncio.to_thread(extract_data_from_images, session["photos"])
         if "contract_num" not in data:
             data["contract_num"] = "1"
             
@@ -467,8 +473,7 @@ async def process_photos_callback(callback: types.CallbackQuery, state: FSMConte
         ])
         
         await msg.edit_text(
-            f"❌ **Ошибка распознавания:**\n`{err_msg}`\n\n"
-            f"📸 Нажмите **«Повторить попытку»** или **«Очистить фото»**, либо отправьте дополнительные фото прямо в чат.",
+            f"❌ **Ошибка распознавания:**\n\n{err_msg}",
             reply_markup=keyboard,
             parse_mode="Markdown"
         )

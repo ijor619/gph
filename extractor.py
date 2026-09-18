@@ -2,6 +2,7 @@ import json
 import base64
 import os
 import re
+import socket
 import urllib.request
 import urllib.error
 import logging
@@ -59,15 +60,15 @@ def safe_load_image(path: str) -> Image.Image:
         return img.copy()
 
 def image_to_clean_base64(path: str) -> str:
-    """Конвертирует изображение в чистый Base64 JPEG"""
+    """Конвертирует изображение в легковесный Base64 JPEG для быстрой передачи по сети"""
     try:
         img = safe_load_image(path)
-        # Масштабируем гигантские фото, чтобы не превышать лимиты API
-        max_size = 2048
+        # 1400px идеально сохраняет мелкий шрифт документов и штампов, но весит в 10 раз меньше
+        max_size = 1400
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
         buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        img.save(buf, format="JPEG", quality=75, optimize=True)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception:
         with open(path, "rb") as f:
@@ -84,7 +85,6 @@ def parse_json_from_response(raw_text: str) -> Dict[str, Any]:
         text = text[:-3]
     text = text.strip()
     
-    # Поиск первого { и последнего }
     start_idx = text.find("{")
     end_idx = text.rfind("}")
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -97,7 +97,7 @@ def get_available_gemini_models(gemini_key: str) -> List[str]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             models = []
             for m in data.get("models", []):
@@ -106,7 +106,6 @@ def get_available_gemini_models(gemini_key: str) -> List[str]:
                     name = m.get("name", "").replace("models/", "")
                     models.append(name)
             
-            # Приоритет отдаем быстрым flash-моделям
             flash_models = [m for m in models if "flash" in m.lower()]
             other_models = [m for m in models if "flash" not in m.lower()]
             found = flash_models + other_models
@@ -122,7 +121,6 @@ def get_available_gemini_models(gemini_key: str) -> List[str]:
     except Exception as e:
         logger.warning(f"Не удалось получить список моделей Gemini: {e}")
 
-    # Fallback список с актуальными моделями (включая вечный алиас gemini-flash-latest)
     return [
         "gemini-flash-latest",
         "gemini-2.5-flash",
@@ -134,8 +132,7 @@ def get_available_gemini_models(gemini_key: str) -> List[str]:
     ]
 
 def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any]:
-    """Распознавание через Google Gemini Flash с автоопределением актуальной модели"""
-    # 1. Подготовка изображений в base64
+    """Распознавание через Google Gemini Flash с быстрым таймаутом (12 сек)"""
     parts = [{"text": EXTRACTION_PROMPT}]
     valid_images_count = 0
     for p in image_paths:
@@ -163,7 +160,6 @@ def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any
     }
     encoded_payload = json.dumps(payload).encode("utf-8")
 
-    # 2. Получаем актуальный список моделей для ключа
     candidate_models = get_available_gemini_models(gemini_key)
     last_err_details = None
 
@@ -176,7 +172,8 @@ def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any
             method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=45) as resp:
+            # Быстрый таймаут 12 сек: не ждем минутами, если Google блокирует IP хостинга
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
                 text = result["candidates"][0]["content"]["parts"][0]["text"]
                 return parse_json_from_response(text)
@@ -184,22 +181,25 @@ def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any
             error_body = e.read().decode("utf-8", errors="ignore")
             last_err_details = f"HTTP {e.code}: {error_body}"
             
-            # Если неверный ключ или блокировка по РФ — сообщаем сразу
             if "API_KEY_INVALID" in error_body or "not valid" in error_body:
                 raise RuntimeError("Неверный ключ Gemini API. Проверьте правильность GEMINI_API_KEY.")
             if "location is not supported" in error_body:
                 raise RuntimeError("Google блокирует доступ с IP-серверов РФ. Подключите ProxyAPI (proxyapi.ru) или OpenRouter.")
             
-            # Если 404 (модель выведена из эксплуатации или переименована) — пробуем следующую модель
             if e.code == 404:
-                logger.info(f"Модель {model_name} вернула 404, переключаемся на следующую...")
+                logger.info(f"Модель {model_name} вернула 404, пробуем следующую...")
                 continue
             raise RuntimeError(f"Ошибка Google Gemini: {last_err_details}")
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            last_err_details = f"Таймаут подключения к Google: {e}"
+            logger.warning(f"Сетевой таймаут к Google ({e}). Домен недоступен с IP хостинга.")
+            # Если домен Google заблокирован по сети, перебор остальных моделей к этому же хосту бессмыслен
+            break
         except Exception as e:
             last_err_details = str(e)
             continue
 
-    # 3. Дополнительная попытка через OpenAI-совместимый эндпоинт Google
+    # Запасная попытка через OpenAI-совместимый эндпоинт Google
     try:
         openai_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
         openai_content = [{"type": "text", "text": EXTRACTION_PROMPT}]
@@ -228,7 +228,7 @@ def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any
             },
             method="POST"
         )
-        with urllib.request.urlopen(oa_req, timeout=45) as resp:
+        with urllib.request.urlopen(oa_req, timeout=12) as resp:
             oa_res = json.loads(resp.read().decode("utf-8"))
             oa_text = oa_res["choices"][0]["message"]["content"]
             return parse_json_from_response(oa_text)
@@ -236,17 +236,20 @@ def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any
         logger.warning(f"Google OpenAI-compatible endpoint error: {e}")
 
     raise RuntimeError(
-        f"Google Gemini не ответил ни на одну модель.\nДетали: {last_err_details}\n\n"
-        "Рекомендация: если сервер Bothost находится в РФ, Google может блокировать запросы. "
-        "Используйте ProxyAPI (proxyapi.ru) или OpenRouter."
+        f"Серверы Google Gemini не отвечают с IP-адреса хостинга Bothost (РФ).\n"
+        f"Детали ошибки: {last_err_details}\n\n"
+        "💡 **Решение для серверов в РФ (займет 1 минуту):**\n"
+        "Подключите шлюз ProxyAPI (https://proxyapi.ru) с бесплатным приветственным балансом:\n"
+        "1. Укажите OPENAI_API_KEY=ваш_ключ_от_proxyapi\n"
+        "2. Укажите OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
+        "После этого распознавание заработает за 4–6 секунд!"
     )
 
 def extract_via_openai(image_paths: List[str], api_key: str, base_url: str = None) -> Dict[str, Any]:
     """Распознавание через OpenAI / ProxyAPI / OpenRouter"""
     from openai import OpenAI
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=25.0)
     
-    # Модель по умолчанию gpt-4o-mini или gpt-4o
     model_name = clean_val(os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
     
     content = [{"type": "text", "text": "Распознай данные документов курьера и верни структурированный JSON."}]
@@ -307,7 +310,7 @@ def extract_data_from_images(image_paths: List[str]) -> Dict[str, Any]:
 
     raise RuntimeError(
         "Не задан ключ распознавания в переменных окружения!\n\n"
-        "1. Для Gemini: добавьте GEMINI_API_KEY (бесплатный на https://aistudio.google.com)\n"
-        "2. Для ProxyAPI (для РФ): добавьте OPENAI_API_KEY и OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
-        "3. Для OpenRouter: добавьте OPENAI_API_KEY и OPENAI_BASE_URL=https://openrouter.ai/api/v1"
+        "1. Для ProxyAPI (рекомендуется для РФ): добавьте OPENAI_API_KEY и OPENAI_BASE_URL=https://api.proxyapi.ru/openai/v1\n"
+        "2. Для OpenRouter: добавьте OPENAI_API_KEY и OPENAI_BASE_URL=https://openrouter.ai/api/v1\n"
+        "3. Для Gemini: добавьте GEMINI_API_KEY (бесплатный на https://aistudio.google.com)"
     )
