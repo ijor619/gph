@@ -2,8 +2,11 @@ import json
 import base64
 import os
 import re
+import logging
 from typing import List, Dict, Any
 from PIL import Image
+
+logger = logging.getLogger("extractor")
 
 EXTRACTION_SYSTEM_PROMPT = """
 You are an expert document OCR assistant for Russian civil contracts (GPH).
@@ -19,12 +22,12 @@ Format:
     "citizenship": "гражданство в родительном падеже (например, 'республики Таджикистан', 'республики Узбекистан', 'Российской Федерации')",
     "birth_date": "дата рождения ДД.ММ.ГГГГ (например, 19.12.1996)",
     "birth_place": "место рождения (например, Таджикистан, Узбекистан)",
-    "passport_str": "документ удостоверяющий личность с серией/номером и датой выдачи (например, 'паспорт 403106091, выдан 07.07.2020')",
+    "passport_str": "документ удостоверяющий личность с серией/номером и датой выдачи (например, 'паспорт 403106091, выдан 06.07.2020')",
     "work_doc_full": "основание для работы (например, 'Вид На Жительство иностранного гражданина 83№1107116, выдан 11.04.2025' или 'Патент 78 № 1234567, выдан 01.02.2025')",
     "work_doc_table": "основание для таблицы реквизитов (например, 'Вид На Жительство иностранного гражданина: 83№1107116')",
     "stay_basis": "основание для п. 5 договора (например, 'Вида На Жительство иностранного гражданина 83№1107116')",
     "stay_issuer": "кем выдан документ пребывания для п. 5 (например, 'ГУ МВД России по г. Санкт-Петербургу и Ленинградской области, дата выдачи документа 11.04.2025')",
-    "reg_address": "полный адрес регистрации со штампа (например, 'г. Санкт-Петербург, пр.Сизова дом 32, корп. 1 лит Б, кв.568')",
+    "reg_address": "полный адрес регистрации со штампа (например, 'г. Санкт-Петербург, пр.Сизова дом 32, корп. 1 лит Б, кв. 1168')",
     "inn": "номер ИНН 12 цифр (например, 780458282597)",
     "snils": "номер СНИЛС (например, 212-101-038-64)",
     "bik": "БИК банка 9 цифр (например, 044030653)",
@@ -78,6 +81,7 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
         
     cleaned = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
     
+    # 1. Попытка стандартного JSON парсинга
     start_idx = cleaned.find("{")
     end_idx = cleaned.rfind("}")
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -95,6 +99,7 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
             except Exception:
                 pass
 
+    # 2. Regex-парсер каждого поля
     data = {}
     fields = [
         "fio", "citizenship", "birth_date", "birth_place", "passport_str",
@@ -125,13 +130,15 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     base_url = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
     if api_key.startswith("sk-or-"):
         base_url = "https://openrouter.ai/api/v1"
+    elif api_key.startswith("AIzaSy"):
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     from openai import OpenAI
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
         default_headers={"HTTP-Referer": "https://bothost.ru", "X-Title": "Courier Bot"},
-        timeout=45.0
+        timeout=30.0
     )
     
     valid_paths = [p for p in image_paths if os.path.exists(p)]
@@ -142,10 +149,10 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     for img_path in valid_paths:
         try:
             with Image.open(img_path) as img:
-                img.thumbnail((1200, 1200))
+                img.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
                 from io import BytesIO
                 buf = BytesIO()
-                img.convert("RGB").save(buf, format="JPEG", quality=75)
+                img.convert("RGB").save(buf, format="JPEG", quality=70, optimize=True)
                 b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         except Exception:
             with open(img_path, "rb") as f:
@@ -165,37 +172,61 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     ]
 
     configured_model = os.getenv("OPENAI_MODEL", "").strip()
+    deprecated_models = ["google/gemini-2.0-flash-exp:free", "openrouter/free", "deepseek/deepseek-r1:free"]
+    if configured_model in deprecated_models:
+        configured_model = ""
+
     if api_key.startswith("sk-or-"):
         models_to_try = [
-            "qwen/qwen3.8-27b:free",
             "google/gemma-4-26b-a4b-it:free",
-            "openrouter/free"
+            "google/gemma-4-31b-it:free",
+            "qwen/qwen3.8-27b:free",
+            "inclusionai/ling-3.0-flash-vl:free"
         ]
         if configured_model and configured_model not in models_to_try:
             models_to_try.insert(0, configured_model)
+    elif api_key.startswith("AIzaSy"):
+        models_to_try = [configured_model or "gemini-2.0-flash"]
     else:
         models_to_try = [configured_model or "gpt-4o-mini"]
 
     last_raw_response = ""
+    errors = []
+
     for model_name in models_to_try:
         try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=0.0,
-                max_tokens=2500
-            )
+            logger.info(f"Trying extraction with model: {model_name}")
+            call_kwargs = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": 0.0,
+                "max_tokens": 2500
+            }
+            if api_key.startswith("sk-or-"):
+                call_kwargs["extra_body"] = {"reasoning": {"effort": "low"}}
+
+            try:
+                response = client.chat.completions.create(**call_kwargs)
+            except Exception:
+                call_kwargs.pop("extra_body", None)
+                response = client.chat.completions.create(**call_kwargs)
+
             msg = response.choices[0].message
             res_text = getattr(msg, "content", None) or getattr(msg, "reasoning", None) or ""
             last_raw_response = res_text
             
             parsed = parse_json_safely(res_text)
             if parsed and isinstance(parsed, dict) and any(parsed.values()):
+                logger.info(f"Successfully parsed documents using model: {model_name}")
                 return parsed
-        except Exception:
+        except Exception as ex:
+            err_msg = f"{model_name}: {str(ex)[:100]}"
+            logger.warning(f"Model attempt failed: {err_msg}")
+            errors.append(err_msg)
             continue
 
     if last_raw_response:
         raise ValueError(f"Модель ответила: {last_raw_response[:120]}")
     
-    raise ValueError("Не удалось распознать документы. Попробуйте отправить фото курьера еще раз.")
+    err_summary = "; ".join(errors[-2:]) if errors else "таймаут ответа сервера"
+    raise ValueError(f"Сбой моделей распознавания ({err_summary}).")
