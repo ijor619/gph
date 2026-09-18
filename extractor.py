@@ -4,7 +4,7 @@ import os
 import re
 import logging
 from typing import List, Dict, Any
-from PIL import Image
+from PIL import Image, ImageOps
 
 logger = logging.getLogger("extractor")
 
@@ -27,7 +27,7 @@ Format:
     "work_doc_table": "основание для таблицы реквизитов (например, 'Вид На Жительство иностранного гражданина: 83№1107116')",
     "stay_basis": "основание для п. 5 договора (например, 'Вида На Жительство иностранного гражданина 83№1107116')",
     "stay_issuer": "кем выдан документ пребывания для п. 5 (например, 'ГУ МВД России по г. Санкт-Петербургу и Ленинградской области, дата выдачи документа 11.04.2025')",
-    "reg_address": "полный адрес регистрации со штампа (например, 'г. Санкт-Петербург, пр.Сизова дом 32, корп. 1 лит Б, кв. 1168')",
+    "reg_address": "CRITICAL: Look for rectangular registration stamp ('ЗАРЕГИСТРИРОВАН ПО МЕСТУ ЖИТЕЛЬСТВА', 'ЗАРЕГИСТРИРОВАН ПО МЕСТУ ПРЕБЫВАНИЯ' or migration card). The photo may be taken vertically or rotated sideways by 90 degrees. Inspect stamps in any orientation! Extract full address: city, street, house, building/corpus/liter, apartment (e.g. 'г. Санкт-Петербург, пр.Сизова дом 32, корп. 1 лит Б, кв. 1168'). Never leave empty if a registration stamp photo is present.",
     "inn": "номер ИНН 12 цифр (например, 780458282597)",
     "snils": "номер СНИЛС (например, 212-101-038-64)",
     "bik": "БИК банка 9 цифр (например, 044030653)",
@@ -145,16 +145,20 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     if not valid_paths:
         raise ValueError("Нет доступных изображений для обработки.")
 
-    content = [{"type": "text", "text": "Extract all courier document data strictly into JSON."}]
+    content = [{
+        "type": "text", 
+        "text": "Extract all courier document data strictly into JSON. ATTENTION: Some photos may be oriented sideways or upside down. Pay special attention to the registration stamp ('ЗАРЕГИСТРИРОВАН ПО МЕСТУ ЖИТЕЛЬСТВА' or migration card) — read the handwritten registration address (город, проспект/улица, дом, корпус/литера, квартира) carefully!"
+    }]
     for img_path in valid_paths:
         try:
             with Image.open(img_path) as img:
-                # Оптимизируем размер: максимум 1000px и сжатие 70%
-                # Это снижает вес запроса с 3 МБ до ~500 КБ, предотвращая таймауты
-                img.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
+                # 1. Автоповорот фото по метаданным EXIF с камеры смартфона
+                img = ImageOps.exif_transpose(img)
+                # 2. Оптимальное разрешение для четкости мелкого рукописного текста
+                img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
                 from io import BytesIO
                 buf = BytesIO()
-                img.convert("RGB").save(buf, format="JPEG", quality=70, optimize=True)
+                img.convert("RGB").save(buf, format="JPEG", quality=75, optimize=True)
                 b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         except Exception:
             with open(img_path, "rb") as f:
@@ -179,10 +183,10 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
         configured_model = ""
 
     if api_key.startswith("sk-or-"):
-        # Быстрые бесплатные мультимодальные модели OpenRouter:
-        # 1. google/gemma-4-26b-a4b-it:free — MoE (3.8B активных параметров), без долгого thinking, ответ за 5-8 сек.
-        # 2. google/gemma-4-31b-it:free — надежная модель от Google DeepMind
-        # 3. qwen/qwen3.8-27b:free — мощная модель для документов (с отключением тяжелого reasoning)
+        # Быстрые мультимодальные модели OpenRouter:
+        # 1. google/gemma-4-26b-a4b-it:free — MoE (3.8B активных), без долгого thinking, ответ за 5-8 сек.
+        # 2. google/gemma-4-31b-it:free — надежная модель Google
+        # 3. qwen/qwen3.8-27b:free — мощная модель (с заниженным reasoning effort, чтобы не висеть минутами)
         # 4. inclusionai/ling-3.0-flash-vl:free — легкая VL модель
         models_to_try = [
             "google/gemma-4-26b-a4b-it:free",
