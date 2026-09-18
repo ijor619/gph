@@ -27,7 +27,7 @@ EXTRACTION_PROMPT = """
     "snils": "номер СНИЛС (например, 212-101-038-64)",
     "bik": "БИК банка 9 цифр (например, 044030653)",
     "rs": "расчетный счет 20 цифр (например, 40820810755170726650)",
-    "ks": "корреспондентский счет 20 цифр (например, 30101810500000000653)"
+    "ks": "корреспондентский счет 20 цифр (начинается на 301...)"
 }
 Внимание:
 1. Если какого-то поля на фото нет — оставь пустую строку "".
@@ -43,9 +43,39 @@ def clean_val(val: str) -> str:
     return val
 
 def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any]:
-    """Бесплатное распознавание через Google Gemini Flash (0 руб, без карт)"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
-    
+    """Бесплатное распознавание через официальный Google Gemini SDK с перебором версий моделей"""
+    last_err = None
+
+    # Вариант 1: Через официальный google-genai SDK
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=gemini_key)
+        images = [Image.open(p) for p in image_paths]
+        contents = [EXTRACTION_PROMPT] + images
+
+        for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.0
+                    )
+                )
+                return json.loads(response.text)
+            except Exception as e:
+                last_err = e
+                err_text = str(e).lower()
+                if "404" in err_text or "not_found" in err_text:
+                    continue
+                raise e
+    except ImportError:
+        pass
+
+    # Вариант 2: Прямой REST API с перебором моделей (gemini-2.5-flash, gemini-2.0-flash)
     parts = [{"text": EXTRACTION_PROMPT}]
     for p in image_paths:
         with open(p, "rb") as f:
@@ -62,17 +92,32 @@ def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any
         "contents": [{"parts": parts}],
         "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"}
     }
-    
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(text)
+    encoded_payload = json.dumps(payload).encode("utf-8")
+
+    for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
+        req = urllib.request.Request(
+            url,
+            data=encoded_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                text = result["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text)
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code == 404:
+                continue
+            error_body = e.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"Google Gemini Error {e.code}: {error_body}")
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(f"Ошибка Gemini API: {last_err}")
 
 def extract_via_openai(image_paths: List[str], api_key: str, base_url: str = None) -> Dict[str, Any]:
     """Распознавание через OpenAI / ProxyAPI / OpenRouter"""
@@ -103,89 +148,13 @@ def extract_via_openai(image_paths: List[str], api_key: str, base_url: str = Non
     )
     return json.loads(response.choices[0].message.content)
 
-def extract_via_tesseract_ocr(image_paths: List[str]) -> Dict[str, Any]:
-    """Локальный OCR (Tesseract)"""
-    import pytesseract
-    full_text = ""
-    for path in image_paths:
-        img = Image.open(path)
-        full_text += "\n" + pytesseract.image_to_string(img, lang="rus+eng")
-
-    data = {
-        "fio": "",
-        "citizenship": "республики Таджикистан",
-        "birth_date": "",
-        "birth_place": "Таджикистан",
-        "passport_str": "",
-        "work_doc_full": "",
-        "work_doc_table": "",
-        "stay_basis": "",
-        "stay_issuer": "ГУ МВД России по г. Санкт-Петербургу и Ленинградской области",
-        "reg_address": "",
-        "inn": "",
-        "snils": "",
-        "bik": "",
-        "rs": "",
-        "ks": ""
-    }
-
-    inn_match = re.search(r'\b(78\d{10}|\d{12})\b', full_text)
-    if inn_match: data["inn"] = inn_match.group(1)
-
-    snils_match = re.search(r'\b(\d{3}[-\s]\d{3}[-\s]\d{3}\s*\d{2})\b', full_text)
-    if snils_match:
-        parts = re.findall(r'\d+', snils_match.group(1))
-        if len(parts) >= 4:
-            data["snils"] = f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}"
-
-    bik_match = re.search(r'\b(04\d{7})\b', full_text)
-    if bik_match: data["bik"] = bik_match.group(1)
-        
-    rs_match = re.search(r'\b(408\d{17})\b', full_text)
-    if rs_match: data["rs"] = rs_match.group(1)
-        
-    ks_match = re.search(r'\b(301\d{17})\b', full_text)
-    if ks_match: data["ks"] = ks_match.group(1)
-
-    fio_matches = re.findall(r'(?:ФИО|Получатель)\s*\n*[\'"]?([А-ЯЁ\s]{8,50})', full_text, re.IGNORECASE)
-    if fio_matches:
-        raw_fio = fio_matches[0].strip().replace("\n", " ")
-        stop_words = {'пол', 'дата', 'рождения', 'место', 'мужской', 'женский', 'свидетельство', 'детали', 'документа'}
-        words = [w.capitalize() for w in raw_fio.split() if w.lower() not in stop_words and w.isalpha()]
-        if len(words) >= 2:
-            data["fio"] = " ".join(words[:4])
-
-    bdate_match = re.search(r'\b(\d{2}\.\d{2}\.\d{4})\b', full_text)
-    if bdate_match: data["birth_date"] = bdate_match.group(1)
-
-    mrz = re.search(r'([A-Z0-9]{9})\d[A-Z]{3}(\d{6})\d[MF]', full_text)
-    if mrz:
-        doc_num = mrz.group(1)
-        data["passport_str"] = f"паспорт {doc_num}"
-
-    vnzh = re.search(r'(83\s*№?\s*11\d{5})', full_text)
-    if vnzh:
-        v_num = vnzh.group(1).replace(" ", "")
-        data["work_doc_full"] = f"Вид На Жительство иностранного гражданина {v_num}"
-        data["work_doc_table"] = f"Вид На Жительство иностранного гражданина: {v_num}"
-        data["stay_basis"] = f"Вида На Жительство иностранного гражданина {v_num}"
-
-    return data
-
 def extract_data_from_images(image_paths: List[str]) -> Dict[str, Any]:
-    """
-    Диспетчер распознавания:
-    1. Проверяет GEMINI_API_KEY (бесплатный AI Google)
-    2. Проверяет OPENAI_API_KEY (OpenAI / ProxyAPI / OpenRouter)
-    3. Пробует системный Tesseract
-    4. Если ничего не настроено — выбрасывает понятную инструкцию
-    """
     gemini_key = clean_val(os.getenv("GEMINI_API_KEY", ""))
     if gemini_key:
         try:
             return extract_via_gemini(image_paths, gemini_key)
         except Exception as e:
-            raise RuntimeError(f"Ошибка Gemini API: {e}. Проверьте правильность GEMINI_API_KEY.")
+            raise RuntimeError(f"{e}")
 
     openai_key = clean_val(os.getenv("OPENAI_API_KEY", ""))
     base_url = clean_val(os.getenv("OPENAI_BASE_URL", "")) or None
@@ -197,22 +166,9 @@ def extract_data_from_images(image_paths: List[str]) -> Dict[str, Any]:
         try:
             return extract_via_openai(image_paths, openai_key, base_url)
         except Exception as e:
-            raise RuntimeError(f"Ошибка Vision API: {e}. Проверьте правильность OPENAI_API_KEY.")
+            raise RuntimeError(f"Ошибка Vision API: {e}")
 
-    # Пробуем локальный Tesseract
-    try:
-        data = extract_via_tesseract_ocr(image_paths)
-        # Если Tesseract вернул пустые поля (не смог распознать фото с телефона)
-        if not data.get("fio") and not data.get("inn"):
-            raise ValueError("Локальный OCR не смог распознать текст с фото.")
-        return data
-    except Exception as e:
-        raise RuntimeError(
-            "Для распознавания фото документов боту требуется бесплатный ключ зрения Google Gemini!\n\n"
-            "Как получить за 30 секунд (100% БЕСПЛАТНО, без карт и денег):\n"
-            "1. Откройте в браузере: https://aistudio.google.com/app/apikey\n"
-            "2. Войдите через Google и нажмите «Create API key»\n"
-            "3. Скопируйте ключ (начинается на AIzaSy...)\n"
-            "4. В панели Bothost добавьте переменную: GEMINI_API_KEY со значением этого ключа\n"
-            "5. Перезапустите бота (кнопка Restart)."
-        )
+    raise RuntimeError(
+        "Не задан ключ распознавания GEMINI_API_KEY!\n"
+        "Получите бесплатный ключ за 30 сек на https://aistudio.google.com/app/apikey"
+    )
