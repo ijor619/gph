@@ -23,6 +23,7 @@ Format:
     "birth_date": "дата рождения ДД.ММ.ГГГГ (например, 19.12.1996)",
     "birth_place": "место рождения (например, Таджикистан, Узбекистан)",
     "passport_str": "документ удостоверяющий личность с серией/номером и датой выдачи (например, 'паспорт 403106091, выдан 06.07.2020')",
+    "passport_issue_date": "дата выдачи паспорта ДД.ММ.ГГГГ (например, 06.07.2020)",
     "work_doc_full": "основание для работы (например, 'Вид На Жительство иностранного гражданина 83№1107116, выдан 11.04.2025' или 'Патент 78 № 1234567, выдан 01.02.2025')",
     "work_doc_table": "основание для таблицы реквизитов (например, 'Вид На Жительство иностранного гражданина: 83№1107116')",
     "stay_basis": "основание для п. 5 договора (например, 'Вида На Жительство иностранного гражданина 83№1107116')",
@@ -73,6 +74,12 @@ def enrich_data(data: dict) -> dict:
         if not data.get('stay_issuer'):
             data['stay_issuer'] = 'ГУ МВД России по г. Санкт-Петербургу и Ленинградской области'
             
+    p_str = data.get('passport_str') or ''
+    if not data.get('passport_issue_date'):
+        m_pdate = re.search(r'\b(\d{2}[./-]\d{2}[./-]\d{4})\b', p_str)
+        if m_pdate:
+            data['passport_issue_date'] = m_pdate.group(1).replace('/', '.').replace('-', '.')
+
     return data
 
 def parse_json_safely(raw_text: str) -> Dict[str, Any]:
@@ -81,7 +88,6 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
         
     cleaned = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
     
-    # 1. Попытка стандартного JSON парсинга
     start_idx = cleaned.find("{")
     end_idx = cleaned.rfind("}")
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -99,10 +105,9 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    # 2. Regex-парсер каждого поля
     data = {}
     fields = [
-        "fio", "citizenship", "birth_date", "birth_place", "passport_str",
+        "fio", "citizenship", "birth_date", "birth_place", "passport_str", "passport_issue_date",
         "work_doc_full", "work_doc_table", "stay_basis", "stay_issuer",
         "reg_address", "inn", "snils", "bik", "rs", "ks"
     ]
@@ -181,10 +186,6 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
         configured_model = ""
 
     if api_key.startswith("sk-or-"):
-        # 1. google/gemma-4-26b-a4b-it:free — MoE (3.8B активных), без долгого thinking, ответ за 5-8 сек.
-        # 2. google/gemma-4-31b-it:free — надежная быстрая модель Google
-        # 3. qwen/qwen3.8-27b:free — мощная модель с отключенным xhigh reasoning
-        # 4. inclusionai/ling-3.0-flash-vl:free — легкая VL модель
         models_to_try = [
             "google/gemma-4-26b-a4b-it:free",
             "google/gemma-4-31b-it:free",
