@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import datetime
 import re
+import uuid
 import logging
 from dotenv import load_dotenv
 
@@ -268,7 +269,6 @@ async def update_upload_status_message(chat_id: int, user_id: int):
         [InlineKeyboardButton(text="🗑 Очистить фото и начать заново", callback_data="clear_photos")]
     ])
     
-    # Удаляем старое статусное сообщение, если оно было выше в чате
     old_status_id = session.get("status_msg_id")
     if old_status_id:
         try:
@@ -277,7 +277,6 @@ async def update_upload_status_message(chat_id: int, user_id: int):
             pass
         session["status_msg_id"] = None
             
-    # ВСЕГДА отправляем НОВОЕ сообщение в самый низ чата — прямо перед глазами пользователя!
     sent_msg = await bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -289,7 +288,7 @@ async def update_upload_status_message(chat_id: int, user_id: int):
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message, state: FSMContext):
-    """Прием фотографий в ЛЮБОМ состоянии (без игнорирования)"""
+    """Прием фотографий в ЛЮБОМ состоянии с уникальными именами файлов"""
     user_id = message.from_user.id
     session = get_or_create_session(user_id, message.chat.id)
     session["chat_id"] = message.chat.id
@@ -298,7 +297,9 @@ async def handle_photo(message: types.Message, state: FSMContext):
     try:
         photo = message.photo[-1]
         file_info = await bot.get_file(photo.file_id)
-        save_path = os.path.join(session["dir"], f"photo_{len(session['photos']) + 1}.jpg")
+        # Уникальный ID файла полностью защищает от перезаписи при загрузке альбома!
+        photo_uid = uuid.uuid4().hex[:8]
+        save_path = os.path.join(session["dir"], f"photo_{photo_uid}.jpg")
         await bot.download_file(file_info.file_path, save_path)
         
         session["photos"].append(save_path)
@@ -308,10 +309,8 @@ async def handle_photo(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Ошибка при загрузке фото. Попробуйте отправить его повторно.")
         return
 
-    # Запускаем / сбрасываем 3-минутный таймер автоудаления
     start_or_reset_cleanup_timer(user_id)
     
-    # Схлопываем уведомления в ОДНО сообщение через дебаунс
     old_task = session.get("notify_task")
     if old_task and not old_task.done():
         old_task.cancel()
@@ -337,7 +336,8 @@ async def handle_document(message: types.Message, state: FSMContext):
     try:
         file_info = await bot.get_file(doc.file_id)
         ext = os.path.splitext(doc.file_name)[1] if doc.file_name else ".jpg"
-        save_path = os.path.join(session["dir"], f"doc_{len(session['photos']) + 1}{ext}")
+        doc_uid = uuid.uuid4().hex[:8]
+        save_path = os.path.join(session["dir"], f"doc_{doc_uid}{ext}")
         await bot.download_file(file_info.file_path, save_path)
         
         session["photos"].append(save_path)
@@ -389,7 +389,6 @@ async def handle_text_general(message: types.Message, state: FSMContext):
     """Универсальная обработка текстовых сообщений (реквизиты, редактирование, команды)"""
     curr_state = await state.get_state()
     
-    # Если пользователь редактирует конкретное поле
     if curr_state == FormStates.edit_field.state:
         await process_edited_field(message, state)
         return
@@ -397,7 +396,6 @@ async def handle_text_general(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     session = get_or_create_session(user_id, message.chat.id)
     
-    # Проверка на банковские реквизиты в тексте
     bank_parsed = parse_bank_text(message.text)
     if bank_parsed:
         session["bank_data"].update(bank_parsed)
@@ -439,7 +437,6 @@ async def process_photos_callback(callback: types.CallbackQuery, state: FSMConte
         pass
 
     try:
-        # Запускаем в отдельном потоке, чтобы сетевые запросы не замораживали бота
         data = await asyncio.to_thread(extract_data_from_images, session["photos"])
         if "contract_num" not in data:
             data["contract_num"] = "1"
@@ -565,7 +562,6 @@ async def generate_contract_callback(callback: types.CallbackQuery, state: FSMCo
                 f"Заполнены: шапка, срок (+6 мес.), п.5, полная таблица реквизитов и подпись.",
         parse_mode="Markdown"
     )
-    # Добавляем отправленный файл Word в список на автоудаление через 3 мин!
     session["cleanup_messages"].append((msg_contract.chat.id, msg_contract.message_id))
 
     # Отправка 2: Согласие на обработку ПД
@@ -576,7 +572,6 @@ async def generate_contract_callback(callback: types.CallbackQuery, state: FSMCo
                 f"Заполнены: ФИО, паспорт, адрес регистрации и строка подписи с датой.",
         parse_mode="Markdown"
     )
-    # Добавляем отправленный файл Word в список на автоудаление через 3 мин!
     session["cleanup_messages"].append((msg_pd.chat.id, msg_pd.message_id))
 
     msg_notice = await callback.message.answer(
