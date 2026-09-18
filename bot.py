@@ -223,32 +223,50 @@ def start_or_reset_cleanup_timer(user_id: int, seconds: int = AUTO_CLEANUP_SECON
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
-    user_id = message.from_user.id
-    
-    if user_id in user_sessions:
-        old_task = user_sessions[user_id].get("cleanup_task")
-        if old_task and not old_task.done():
-            old_task.cancel()
-        shutil.rmtree(user_sessions[user_id]["dir"], ignore_errors=True)
-        del user_sessions[user_id]
+    try:
+        await state.clear()
+        user_id = message.from_user.id
         
-    get_or_create_session(user_id, message.chat.id)
-    await state.set_state(FormStates.waiting_for_docs)
-    
-    await message.answer(
-        "👋 <b>Бот для автозаполнения договоров ГПХ и согласий на ПД курьеров</b>\n\n"
-        "📸 <b>Отправьте фотографии документов курьера:**\n"
-        "1. Паспорт (разворот с фото)\n"
-        "2. Основание для работы (ВНЖ / Патент / РВП)\n"
-        "3. Штамп регистрации (или бланк миграционного учёта)\n"
-        "4. ИНН и СНИЛС\n"
-        "5. Банковские реквизиты — <b>скрином из банка</b> ИЛИ <b>текстом сюда</b>\n\n"
-        "💡 <i>Дата договора: +1 день к календарю, срок: 6 месяцев.</i>\n"
-        "🔒 <i>Все фото и готовые документы удаляются через 3 минуты после выдачи.</i>\n\n"
-        "Жду отправки фото...",
-        parse_mode="HTML"
-    )
+        if user_id in user_sessions:
+            old_task = user_sessions[user_id].get("cleanup_task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+            shutil.rmtree(user_sessions[user_id]["dir"], ignore_errors=True)
+            del user_sessions[user_id]
+            
+        get_or_create_session(user_id, message.chat.id)
+        await state.set_state(FormStates.waiting_for_docs)
+        
+        welcome_html = (
+            "👋 <b>Бот для автозаполнения договоров ГПХ и согласий на ПД курьеров</b>\n\n"
+            "📸 <b>Отправьте фотографии документов курьера:</b>\n"
+            "1. Паспорт (разворот с фото)\n"
+            "2. Основание для работы (ВНЖ / Патент / РВП)\n"
+            "3. Штамп регистрации (или бланк миграционного учёта)\n"
+            "4. ИНН и СНИЛС\n"
+            "5. Банковские реквизиты — <b>скрином из банка</b> ИЛИ <b>текстом сюда</b>\n\n"
+            "💡 <i>Дата договора: +1 день к календарю, срок: 6 месяцев.</i>\n"
+            "🔒 <i>Все фото и готовые документы удаляются через 3 минуты после выдачи.</i>\n\n"
+            "Жду отправки фото..."
+        )
+        try:
+            await message.answer(welcome_html, parse_mode="HTML")
+        except Exception as parse_err:
+            logger.error(f"HTML error in cmd_start: {parse_err}")
+            await message.answer(
+                "👋 Бот для автозаполнения договоров ГПХ и согласий на ПД курьеров\n\n"
+                "📸 Отправьте фотографии документов курьера:\n"
+                "1. Паспорт (разворот с фото)\n"
+                "2. Основание для работы (ВНЖ / Патент / РВП)\n"
+                "3. Штамп регистрации (или бланк миграционного учёта)\n"
+                "4. ИНН и СНИЛС\n"
+                "5. Банковские реквизиты — скрином из банка ИЛИ текстом сюда\n\n"
+                "💡 Дата договора: +1 день к календарю, срок: 6 месяцев.\n"
+                "🔒 Все фото и готовые документы удаляются через 3 минуты после выдачи.\n\n"
+                "Жду отправки фото..."
+            )
+    except Exception as e:
+        logger.exception(f"Unhandled error in cmd_start: {e}")
 
 async def update_upload_status_message(chat_id: int, user_id: int):
     """Дебаунс: отправляет ровно одно свежее сообщение при загрузке фото курьера"""
@@ -667,6 +685,10 @@ async def reset_session_callback(callback: types.CallbackQuery, state: FSMContex
 
 async def main():
     logger.info("Запуск Telegram-бота курьеров...")
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logger.warning(f"Could not delete webhook: {e}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
