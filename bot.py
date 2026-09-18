@@ -105,6 +105,7 @@ def parse_bank_text(text: str) -> dict:
 def get_confirm_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Всё верно, сформировать оба документа", callback_data="generate_contract")],
+        [InlineKeyboardButton(text="🔎 Проверить курьера в РКЛ МВД ↗️", callback_data="check_rkl")],
         [
             InlineKeyboardButton(text="📅 Изменить дату", callback_data="edit_date"),
             InlineKeyboardButton(text="🔢 Номер договора", callback_data="edit_contract_num")
@@ -237,7 +238,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     
     await message.answer(
         "👋 <b>Бот для автозаполнения договоров ГПХ и согласий на ПД курьеров</b>\n\n"
-        "📸 <b>Отправьте фотографии документов курьера:</b>\n"
+        "📸 <b>Отправьте фотографии документов курьера:**\n"
         "1. Паспорт (разворот с фото)\n"
         "2. Основание для работы (ВНЖ / Патент / РВП)\n"
         "3. Штамп регистрации (или бланк миграционного учёта)\n"
@@ -492,6 +493,51 @@ async def process_photos_callback(callback: types.CallbackQuery, state: FSMConte
             except Exception:
                 pass
             await callback.message.answer(err_text, reply_markup=keyboard, parse_mode="HTML")
+
+@dp.callback_query(F.data == "check_rkl")
+async def check_rkl_callback(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    session = user_sessions.get(user_id)
+    if not session or not session.get("extracted_data"):
+        await callback.answer("⚠️ Нет данных курьера для проверки.", show_alert=True)
+        return
+
+    data = session["extracted_data"]
+    fio = data.get("fio", "").strip()
+    parts = fio.split()
+    last_name = parts[0] if len(parts) > 0 else "—"
+    first_name = parts[1] if len(parts) > 1 else "—"
+    patronymic = parts[2] if len(parts) > 2 else ""
+    
+    bdate = data.get("birth_date", "—")
+    pass_str = data.get("passport_str", "—")
+    
+    # Извлекаем номер паспорта (цифры/буквы серии и номера)
+    m_pass = re.search(r'(?:паспорт\s*)?([A-Z0-9]{6,12})', pass_str, re.IGNORECASE)
+    pass_num = m_pass.group(1) if m_pass else pass_str
+
+    text = (
+        "👮‍♂️ <b>Данные курьера для проверки в Реестре контролируемых лиц (РКЛ МВД):</b>\n\n"
+        "💡 <i>Нажмите на значение в рамке, чтобы скопировать его в 1 клик для вставки на сайт МВД:</i>\n\n"
+        f"• <b>Фамилия:</b> <code>{html.escape(last_name)}</code>\n"
+        f"• <b>Имя:</b> <code>{html.escape(first_name)}</code>\n"
+    )
+    if patronymic:
+        text += f"• <b>Отчество:</b> <code>{html.escape(patronymic)}</code>\n"
+    text += (
+        f"• <b>Дата рождения:</b> <code>{html.escape(bdate)}</code>\n"
+        f"• <b>Серия и номер документа:</b> <code>{html.escape(pass_num)}</code>\n\n"
+        "🌐 <i>Перейдите на официальный сайт МВД России по кнопке ниже:</i>"
+    )
+
+    rkl_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Открыть форму РКЛ на сайте мвд.рф ↗️", url="https://xn--b1aew.xn--p1ai/rkl")],
+        [InlineKeyboardButton(text="✅ Всё проверено, сформировать документы", callback_data="generate_contract")]
+    ])
+
+    msg = await callback.message.answer(text, reply_markup=rkl_keyboard, parse_mode="HTML")
+    session["cleanup_messages"].append((msg.chat.id, msg.message_id))
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("edit_"))
 async def handle_edit_field_click(callback: types.CallbackQuery, state: FSMContext):
