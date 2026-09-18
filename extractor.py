@@ -4,8 +4,12 @@ import os
 import re
 import urllib.request
 import urllib.error
+from io import BytesIO
 from typing import List, Dict, Any
-from PIL import Image
+from PIL import Image, ImageFile
+
+# Разрешаем загрузку неполных/сжатых Telegram изображений
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 EXTRACTION_PROMPT = """
 Ты — профессиональный ассистент по распознаванию документов курьеров для заключения договоров ГПХ.
@@ -42,18 +46,46 @@ def clean_val(val: str) -> str:
         val = val.split("=", 1)[1].strip().strip('"').strip("'")
     return val
 
+def safe_load_image(path: str) -> Image.Image:
+    """Безопасная загрузка изображения с защитой от broken data stream"""
+    with Image.open(path) as img:
+        img.load()
+        if img.mode != "RGB":
+            return img.convert("RGB")
+        return img.copy()
+
+def image_to_clean_base64(path: str) -> str:
+    """Конвертирует изображение в чистый Base64 JPEG"""
+    try:
+        img = safe_load_image(path)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+
 def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any]:
-    """Бесплатное распознавание через официальный Google Gemini SDK с перебором версий моделей"""
+    """Распознавание через Google Gemini Flash с защитой от поврежденных стримов"""
+    loaded_images = []
+    for p in image_paths:
+        try:
+            loaded_images.append(safe_load_image(p))
+        except Exception as e:
+            print(f"Предупреждение: файл {p} пропущен из-за ошибки чтения: {e}")
+
+    if not loaded_images:
+        raise ValueError("Не удалось прочитать ни одного изображения из отправленных.")
+
     last_err = None
 
-    # Вариант 1: Через официальный google-genai SDK
+    # 1. Попытка через SDK google-genai
     try:
         from google import genai
         from google.genai import types
 
         client = genai.Client(api_key=gemini_key)
-        images = [Image.open(p) for p in image_paths]
-        contents = [EXTRACTION_PROMPT] + images
+        contents = [EXTRACTION_PROMPT] + loaded_images
 
         for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
             try:
@@ -75,19 +107,20 @@ def extract_via_gemini(image_paths: List[str], gemini_key: str) -> Dict[str, Any
     except ImportError:
         pass
 
-    # Вариант 2: Прямой REST API с перебором моделей (gemini-2.5-flash, gemini-2.0-flash)
+    # 2. Попытка через REST API (передаем очищенный base64)
     parts = [{"text": EXTRACTION_PROMPT}]
     for p in image_paths:
-        with open(p, "rb") as f:
-            b64_data = base64.b64encode(f.read()).decode("utf-8")
-        mime = "image/jpeg" if p.lower().endswith((".jpg", ".jpeg")) else "image/png"
-        parts.append({
-            "inline_data": {
-                "mime_type": mime,
-                "data": b64_data
-            }
-        })
-        
+        try:
+            b64_str = image_to_clean_base64(p)
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": b64_str
+                }
+            })
+        except Exception:
+            pass
+
     payload = {
         "contents": [{"parts": parts}],
         "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"}
@@ -126,16 +159,17 @@ def extract_via_openai(image_paths: List[str], api_key: str, base_url: str = Non
     
     content = [{"type": "text", "text": "Распознай данные документов курьера и верни структурированный JSON."}]
     for img_path in image_paths:
-        with open(img_path, "rb") as img_file:
-            b64 = base64.b64encode(img_file.read()).decode("utf-8")
-            mime = "image/jpeg" if img_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        try:
+            b64 = image_to_clean_base64(img_path)
             content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:{mime};base64,{b64}",
+                    "url": f"data:image/jpeg;base64,{b64}",
                     "detail": "high"
                 }
             })
+        except Exception:
+            pass
     
     response = client.chat.completions.create(
         model="gpt-4o",
