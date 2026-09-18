@@ -138,7 +138,7 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
         api_key=api_key,
         base_url=base_url,
         default_headers={"HTTP-Referer": "https://bothost.ru", "X-Title": "Courier Bot"},
-        timeout=30.0
+        timeout=25.0
     )
     
     valid_paths = [p for p in image_paths if os.path.exists(p)]
@@ -152,9 +152,7 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     for img_path in valid_paths:
         try:
             with Image.open(img_path) as img:
-                # 1. Автоповорот фото по метаданным EXIF с камеры смартфона
                 img = ImageOps.exif_transpose(img)
-                # 2. Оптимальное разрешение для четкости мелкого рукописного текста
                 img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
                 from io import BytesIO
                 buf = BytesIO()
@@ -183,10 +181,9 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
         configured_model = ""
 
     if api_key.startswith("sk-or-"):
-        # Быстрые мультимодальные модели OpenRouter:
         # 1. google/gemma-4-26b-a4b-it:free — MoE (3.8B активных), без долгого thinking, ответ за 5-8 сек.
-        # 2. google/gemma-4-31b-it:free — надежная модель Google
-        # 3. qwen/qwen3.8-27b:free — мощная модель (с заниженным reasoning effort, чтобы не висеть минутами)
+        # 2. google/gemma-4-31b-it:free — надежная быстрая модель Google
+        # 3. qwen/qwen3.8-27b:free — мощная модель с отключенным xhigh reasoning
         # 4. inclusionai/ling-3.0-flash-vl:free — легкая VL модель
         models_to_try = [
             "google/gemma-4-26b-a4b-it:free",
@@ -213,7 +210,7 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
                 "temperature": 0.0,
                 "max_tokens": 2500
             }
-            if api_key.startswith("sk-or-"):
+            if api_key.startswith("sk-or-") and "qwen" in model_name.lower():
                 call_kwargs["extra_body"] = {"reasoning": {"effort": "low"}}
 
             try:
