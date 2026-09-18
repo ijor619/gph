@@ -41,21 +41,42 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
         
     cleaned = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
     
+    # 1. Попытка стандартного JSON парсинга
     start_idx = cleaned.find("{")
     end_idx = cleaned.rfind("}")
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
         candidate = cleaned[start_idx:end_idx + 1]
-    else:
-        return None
-        
-    try:
-        return json.loads(candidate)
-    except Exception:
-        candidate = re.sub(r',\s*([\]}])', r'\1', candidate)
         try:
-            return json.loads(candidate)
+            res = json.loads(candidate)
+            if isinstance(res, dict) and any(res.values()):
+                return res
         except Exception:
-            return None
+            candidate_clean = re.sub(r',\s*([\]}])', r'\1', candidate)
+            try:
+                res = json.loads(candidate_clean)
+                if isinstance(res, dict) and any(res.values()):
+                    return res
+            except Exception:
+                pass
+
+    # 2. Неубиваемый Regex-парсер каждого поля (вытаскивает данные даже из текста с размышлениями)
+    data = {}
+    fields = [
+        "fio", "citizenship", "birth_date", "birth_place", "passport_str",
+        "work_doc_full", "work_doc_table", "stay_basis", "stay_issuer",
+        "reg_address", "inn", "snils", "bik", "rs", "ks"
+    ]
+    for field in fields:
+        m = re.search(rf'[\"\']?{field}[\"\']?\s*[:=]\s*[\"\']([^\"\'\n\r}}]+)[\"\']', raw_text, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip()
+            if val.lower() not in ["null", "none"]:
+                data[field] = val
+
+    if data.get("fio") or data.get("passport_str") or data.get("inn") or data.get("snils") or data.get("work_doc_full"):
+        return data
+        
+    return None
 
 def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dict[str, Any]:
     api_key = api_key or os.getenv("OPENAI_API_KEY", "")
@@ -141,7 +162,7 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
             last_raw_response = res_text
             
             parsed = parse_json_safely(res_text)
-            if parsed and isinstance(parsed, dict) and (parsed.get("fio") or parsed.get("passport_str") or parsed.get("inn") or parsed.get("work_doc_full")):
+            if parsed and isinstance(parsed, dict) and any(parsed.values()):
                 return parsed
         except Exception:
             continue
