@@ -135,23 +135,23 @@ def format_summary_message(data: dict) -> str:
     fio_short = make_fio_initials(fio)
     
     return (
-        "📋 **Проверьте данные перед формированием документов:**\n\n"
-        f"📑 **Номер договора:** № {data.get('contract_num', '1')}\n"
-        f"📅 **Дата подписания:** {date_str} *(+1 день к календарю)*\n"
-        f"⏳ **Срок действия:** с {date_str} по {end_date_str} *(6 месяцев)*\n"
-        f"✍️ **Строка подписи:** `{fio_short} /_______/ {date_str}`\n\n"
-        f"👤 **ФИО:** {fio}\n"
-        f"🌍 **Гражданство:** {data.get('citizenship', '—')}\n"
-        f"🎂 **Дата и место рождения:** {data.get('birth_date', '—')}, {data.get('birth_place', '—')}\n"
-        f"🪪 **Паспорт:** {data.get('passport_str', '—')}\n"
-        f"📄 **Основание работы:** {data.get('work_doc_full', '—')}\n"
-        f"📍 **Адрес регистрации:** {data.get('reg_address', '—')}\n"
-        f"🔢 **ИНН:** `{data.get('inn', '—')}` | **СНИЛС:** `{data.get('snils', '—')}`\n\n"
-        f"💳 **Банковские реквизиты:**\n"
-        f"• БИК: `{bik}`\n"
-        f"• Р/С: `{rs}`\n"
-        f"• К/С: `{ks}`\n\n"
-        f"🔒 _Файлы Word будут сформированы и автоматически удалены через 3 минуты._"
+        "📋 <b>Проверьте данные перед формированием документов:</b>\n\n"
+        f"📑 <b>Номер договора:</b> № {html.escape(str(data.get('contract_num', '1')))}\n"
+        f"📅 <b>Дата подписания:</b> {html.escape(date_str)} <i>(+1 день к календарю)</i>\n"
+        f"⏳ <b>Срок действия:</b> с {html.escape(date_str)} по {html.escape(end_date_str)} <i>(6 месяцев)</i>\n"
+        f"✍️ <b>Строка подписи:</b> <code>{html.escape(fio_short)} /_______/ {html.escape(date_str)}</code>\n\n"
+        f"👤 <b>ФИО:</b> {html.escape(str(fio))}\n"
+        f"🌍 <b>Гражданство:</b> {html.escape(str(data.get('citizenship', '—')))}\n"
+        f"🎂 <b>Дата и место рождения:</b> {html.escape(str(data.get('birth_date', '—')))}, {html.escape(str(data.get('birth_place', '—')))}\n"
+        f"🪪 <b>Паспорт:</b> {html.escape(str(data.get('passport_str', '—')))}\n"
+        f"📄 <b>Основание работы:</b> {html.escape(str(data.get('work_doc_full', '—')))}\n"
+        f"📍 <b>Адрес регистрации:</b> {html.escape(str(data.get('reg_address', '—')))}\n"
+        f"🔢 <b>ИНН:</b> <code>{html.escape(str(data.get('inn', '—')))}</code> | <b>СНИЛС:</b> <code>{html.escape(str(data.get('snils', '—')))}</code>\n\n"
+        f"💳 <b>Банковские реквизиты:</b>\n"
+        f"• БИК: <code>{html.escape(str(bik))}</code>\n"
+        f"• Р/С: <code>{html.escape(str(rs))}</code>\n"
+        f"• К/С: <code>{html.escape(str(ks))}</code>\n\n"
+        f"🔒 <i>Файлы Word будут сформированы и автоматически удалены через 3 минуты после выдачи.</i>"
     )
 
 def get_or_create_session(user_id: int, chat_id: int) -> dict:
@@ -171,39 +171,41 @@ def get_or_create_session(user_id: int, chat_id: int) -> dict:
         }
     return user_sessions[user_id]
 
-async def trigger_cleanup_job(user_id: int, delay_seconds: int):
-    """Фоновая задача автоудаления всех следов персональных данных через N секунд"""
-    await asyncio.sleep(delay_seconds)
+async def trigger_cleanup_job(user_id: int, delay: int):
+    """Задача автоудаления всех фото, файлов и сообщений"""
+    await asyncio.sleep(delay)
     session = user_sessions.pop(user_id, None)
     if not session:
         return
         
-    logger.info(f"Сработал таймер безопасности ({delay_seconds} сек) для пользователя {user_id}. Очищаю данные...")
-    
-    # 1. Удаление всех временных файлов с сервера
-    try:
-        shutil.rmtree(session["dir"], ignore_errors=True)
-        logger.info(f"Директория сессии {session['dir']} успешно удалена.")
-    except Exception as e:
-        logger.error(f"Ошибка удаления директории: {e}")
-        
-    # 2. Удаление всех сообщений из чата Telegram
     messages_to_delete = session.get("cleanup_messages", [])
+    session_dir = session.get("dir")
     chat_id = session.get("chat_id")
+    
+    # 1. Удаление сообщений (фото, файлов docx) из чата Telegram
     for c_id, m_id in messages_to_delete:
         try:
             await bot.delete_message(chat_id=c_id, message_id=m_id)
             await asyncio.sleep(0.05)
         except Exception:
             pass
+
+    # 2. Удаление файлов с сервера
+    try:
+        if session_dir and os.path.exists(session_dir):
+            shutil.rmtree(session_dir, ignore_errors=True)
+            logger.info(f"🧹 Сессия {user_id}: папка {session_dir} безвозвратно удалена.")
+    except Exception as e:
+        logger.error(f"Ошибка удаления файлов: {e}")
         
     try:
         target_chat = chat_id or (messages_to_delete[0][0] if messages_to_delete else None)
         if target_chat:
             await bot.send_message(
                 chat_id=target_chat,
-                text="🧹 **Безопасность (152-ФЗ)**: Прошло 3 минуты.\n"
-                     "Все загруженные фотографии документов и сгенерированные файлы Word были **автоматически и безвозвратно удалены** из этого чата и с сервера."
+                text="🧹 <b>Безопасность (152-ФЗ)</b>: Прошло 3 минуты.\n"
+                     "Все загруженные фотографии документов и сгенерированные файлы Word были <b>автоматически и безвозвратно удалены</b> из этого чата и с сервера.",
+                parse_mode="HTML"
             )
     except Exception:
         pass
@@ -234,21 +236,22 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.set_state(FormStates.waiting_for_docs)
     
     await message.answer(
-        "👋 **Бот для автозаполнения договоров ГПХ и согласий на ПД курьеров**\n\n"
-        "📸 **Отправьте фотографии документов курьера:**\n"
+        "👋 <b>Бот для автозаполнения договоров ГПХ и согласий на ПД курьеров</b>\n\n"
+        "📸 <b>Отправьте фотографии документов курьера:</b>\n"
         "1. Паспорт (разворот с фото)\n"
         "2. Основание для работы (ВНЖ / Патент / РВП)\n"
         "3. Штамп регистрации (или бланк миграционного учёта)\n"
         "4. ИНН и СНИЛС\n"
-        "5. Банковские реквизиты — скрином из банка ИЛИ текстом сюда\n\n"
-        "💡 Дата договора: +1 день к календарю, срок: 6 месяцев.\n"
-        "🔒 Все фото и готовые документы удаляются через 3 минуты.\n\n"
-        "Жду отправки фото..."
+        "5. Банковские реквизиты — <b>скрином из банка</b> ИЛИ <b>текстом сюда</b>\n\n"
+        "💡 <i>Дата договора: +1 день к календарю, срок: 6 месяцев.</i>\n"
+        "🔒 <i>Все фото и готовые документы удаляются через 3 минуты после выдачи.</i>\n\n"
+        "Жду отправки фото...",
+        parse_mode="HTML"
     )
 
 async def update_upload_status_message(chat_id: int, user_id: int):
-    """Дебаунс 1.5 сек для альбомов фото"""
-    await asyncio.sleep(1.5)
+    """Дебаунс: отправляет ровно одно свежее сообщение при загрузке фото курьера"""
+    await asyncio.sleep(1.2)
     session = user_sessions.get(user_id)
     if not session:
         return
@@ -256,9 +259,9 @@ async def update_upload_status_message(chat_id: int, user_id: int):
     count = len(session.get("photos", []))
     if count == 0:
         return
-
+        
     text = (
-        f"📸 **Принято фото документов: {count} шт.**\n\n"
+        f"📸 <b>Принято фото документов: {count} шт.</b>\n\n"
         f"Можете отправить ещё документы/реквизиты или нажать кнопку ниже 👇"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -278,7 +281,7 @@ async def update_upload_status_message(chat_id: int, user_id: int):
         chat_id=chat_id,
         text=text,
         reply_markup=keyboard,
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     session["status_msg_id"] = sent_msg.message_id
     session["cleanup_messages"].append((chat_id, sent_msg.message_id))
@@ -305,6 +308,7 @@ async def handle_photo(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Ошибка при загрузке фото. Попробуйте отправить его повторно.")
         return
 
+    # 10 минут на спокойную загрузку и проверку
     start_or_reset_cleanup_timer(user_id, seconds=600)
     
     old_task = session.get("notify_task")
@@ -321,7 +325,7 @@ async def handle_document(message: types.Message, state: FSMContext):
     
     is_img = mime.startswith("image/") or fname.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp"))
     if not is_img:
-        await message.answer("⚠️ Пожалуйста, отправляйте документы курьера как **фотографии** (JPG, PNG).")
+        await message.answer("⚠️ Пожалуйста, отправляйте документы курьера как <b>фотографии</b> (JPG, PNG).", parse_mode="HTML")
         return
         
     user_id = message.from_user.id
@@ -374,15 +378,15 @@ async def add_more_photos_callback(callback: types.CallbackQuery, state: FSMCont
     await callback.answer()
 
 @dp.message(F.text)
-async def handle_text(message: types.Message, state: FSMContext):
+async def handle_text_general(message: types.Message, state: FSMContext):
     """Универсальная обработка текстовых сообщений"""
     curr_state = await state.get_state()
     
     if curr_state == FormStates.processing_docs.state:
         await message.answer(
-            "⏳ **Документы сейчас обрабатываются нейросетью.**\n"
-            "Обычно это занимает от 5 до 15 секунд. Пожалуйста, подождите завершения...",
-            parse_mode="Markdown"
+            "⏳ <b>Документы сейчас обрабатываются нейросетью.</b>\n"
+            "Обычно это занимает около 1 минуты. Пожалуйста, дождитесь завершения...",
+            parse_mode="HTML"
         )
         return
 
@@ -402,12 +406,12 @@ async def handle_text(message: types.Message, state: FSMContext):
         rs = bank_parsed.get("rs", "не найден")
         ks = bank_parsed.get("ks", "не найден")
         msg = await message.answer(
-            f"💳 **Банковские реквизиты распознаны из текста:**\n"
-            f"• БИК: `{bik}`\n"
-            f"• Р/С: `{rs}`\n"
-            f"• К/С: `{ks}`\n\n"
-            f"Они будут автоматически подставлены в договор!",
-            parse_mode="Markdown"
+            "💳 <b>Банковские реквизиты распознаны из текста:</b>\n"
+            f"• БИК: <code>{bik}</code>\n"
+            f"• Р/С: <code>{rs}</code>\n"
+            f"• К/С: <code>{ks}</code>\n\n"
+            "Они будут автоматически подставлены в договор!",
+            parse_mode="HTML"
         )
         session["cleanup_messages"].append((msg.chat.id, msg.message_id))
     else:
@@ -426,7 +430,10 @@ async def process_photos_callback(callback: types.CallbackQuery, state: FSMConte
         return
 
     await state.set_state(FormStates.processing_docs)
-    msg = await callback.message.answer("⏳ Распознаю текст с документов... (обычно 5-15 секунд)")
+    msg = await callback.message.answer(
+        "⏳ <b>Распознаю документы курьера...</b> (обычно около 1 минуты, пожалуйста, подождите)",
+        parse_mode="HTML"
+    )
     await callback.answer()
 
     try:
@@ -456,7 +463,7 @@ async def process_photos_callback(callback: types.CallbackQuery, state: FSMConte
 
         summary_msg = await callback.message.answer(
             format_summary_message(data),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=get_confirm_keyboard()
         )
         session["cleanup_messages"].append((summary_msg.chat.id, summary_msg.message_id))
@@ -532,7 +539,7 @@ async def process_edited_field(message: types.Message, state: FSMContext):
         await message.answer("✅ Данные обновлены!")
         summary_msg = await message.answer(
             format_summary_message(data),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=get_confirm_keyboard()
         )
         session["cleanup_messages"].append((summary_msg.chat.id, summary_msg.message_id))
@@ -569,9 +576,9 @@ async def generate_contract_callback(callback: types.CallbackQuery, state: FSMCo
     doc_contract = FSInputFile(contract_path, filename=contract_name)
     msg_contract = await callback.message.answer_document(
         document=doc_contract,
-        caption=f"📄 **1. Договор ГПХ** для курьера: **{data.get('fio', 'Курьер')}**\n"
+        caption=f"📄 <b>1. Договор ГПХ</b> для курьера: <b>{html.escape(data.get('fio', 'Курьер'))}</b>\n"
                 f"Заполнены: шапка, срок (+6 мес.), п.5, полная таблица реквизитов и подпись.",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     session["cleanup_messages"].append((msg_contract.chat.id, msg_contract.message_id))
 
@@ -579,17 +586,18 @@ async def generate_contract_callback(callback: types.CallbackQuery, state: FSMCo
     doc_pd = FSInputFile(pd_path, filename=pd_name)
     msg_pd = await callback.message.answer_document(
         document=doc_pd,
-        caption=f"📑 **2. Согласие на обработку персональных данных**\n"
+        caption=f"📑 <b>2. Согласие на обработку персональных данных</b>\n"
                 f"Заполнены: ФИО, паспорт, адрес регистрации и строка подписи с датой.",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     session["cleanup_messages"].append((msg_pd.chat.id, msg_pd.message_id))
 
     msg_notice = await callback.message.answer(
-        "🔒 **Безопасность персональных данных курьера (152-ФЗ):**\n"
-        "Ровно через **3 минуты** все загруженные фото и оба сгенерированных файла Word будут **автоматически удалены из этого чата** и стёрты с сервера.\n\n"
+        "🔒 <b>Безопасность персональных данных курьера (152-ФЗ):</b>\n"
+        "Ровно через <b>3 минуты</b> все загруженные фото и оба сгенерированных файла Word будут <b>автоматически удалены из этого чата</b> и стёрты с сервера.\n\n"
         "Успейте скачать файлы себе на устройство!\n"
-        "Для следующего курьера отправьте /start"
+        "Для следующего курьера отправьте /start",
+        parse_mode="HTML"
     )
     session["cleanup_messages"].append((msg_notice.chat.id, msg_notice.message_id))
     
@@ -613,7 +621,6 @@ async def reset_session_callback(callback: types.CallbackQuery, state: FSMContex
 
 async def main():
     logger.info("Запуск Telegram-бота курьеров...")
-    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
