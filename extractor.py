@@ -149,6 +149,8 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     for img_path in valid_paths:
         try:
             with Image.open(img_path) as img:
+                # Оптимизируем размер: максимум 1000px и сжатие 70%
+                # Это снижает вес запроса с 3 МБ до ~500 КБ, предотвращая таймауты
                 img.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
                 from io import BytesIO
                 buf = BytesIO()
@@ -177,6 +179,11 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
         configured_model = ""
 
     if api_key.startswith("sk-or-"):
+        # Быстрые бесплатные мультимодальные модели OpenRouter:
+        # 1. google/gemma-4-26b-a4b-it:free — MoE (3.8B активных параметров), без долгого thinking, ответ за 5-8 сек.
+        # 2. google/gemma-4-31b-it:free — надежная модель от Google DeepMind
+        # 3. qwen/qwen3.8-27b:free — мощная модель для документов (с отключением тяжелого reasoning)
+        # 4. inclusionai/ling-3.0-flash-vl:free — легкая VL модель
         models_to_try = [
             "google/gemma-4-26b-a4b-it:free",
             "google/gemma-4-31b-it:free",
