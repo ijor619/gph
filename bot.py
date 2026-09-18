@@ -139,42 +139,50 @@ def format_summary_message(data: dict) -> str:
         f"✍️ **Строка подписи:** `{fio_short} /_______/ {date_str}`\n\n"
         f"👤 **ФИО:** {fio}\n"
         f"🌍 **Гражданство:** {data.get('citizenship', '—')}\n"
-        f"🎂 **Дата рождения:** {data.get('birth_date', '—')} (место: {data.get('birth_place', '—')})\n"
+        f"🎂 **Дата и место рождения:** {data.get('birth_date', '—')}, {data.get('birth_place', '—')}\n"
         f"🪪 **Паспорт:** {data.get('passport_str', '—')}\n"
         f"📄 **Основание работы:** {data.get('work_doc_full', '—')}\n"
-        f"🏠 **Адрес регистрации:** {data.get('reg_address', '—')}\n"
-        f"🏛 **Кем выдан статус (п.5):** {data.get('stay_issuer', '—')}\n"
-        f"🔢 **ИНН:** {data.get('inn', '—')}\n"
-        f"🔢 **СНИЛС:** {data.get('snils', '—')}\n\n"
+        f"📍 **Адрес регистрации:** {data.get('reg_address', '—')}\n"
+        f"🔢 **ИНН:** `{data.get('inn', '—')}` | **СНИЛС:** `{data.get('snils', '—')}`\n\n"
         f"💳 **Банковские реквизиты:**\n"
-        f"  • БИК: `{bik}`\n"
-        f"  • Р/С: `{rs}`\n"
-        f"  • К/С: `{ks}`\n\n"
-        "👇 _Нажмите «Сформировать оба документа» — бот пришлёт Договор ГПХ и Согласие на ПД._\n"
-        "⏱ _Таймер безопасности удалит ВСЕ фото и присланные файлы Word через 3 минуты._"
+        f"• БИК: `{bik}`\n"
+        f"• Р/С: `{rs}`\n"
+        f"• К/С: `{ks}`\n\n"
+        f"🔒 _Файлы Word будут сформированы и автоматически удалены через 3 минуты._"
     )
 
-async def trigger_cleanup_job(user_id: int, delay_seconds: int = AUTO_CLEANUP_SECONDS):
-    """
-    Фоновый таймер автоудаления через 3 минуты:
-    1. Удаляет ВСЕ фото документов прямо из чата Telegram.
-    2. Удаляет ВСЕ отправленные файлы Word (.docx) из чата Telegram.
-    3. Безвозвратно удаляет временную папку с файлами на сервере Bothost.
-    """
-    logger.info(f"Таймер удаления: старт обратного отсчета {delay_seconds}с для пользователя {user_id}")
-    await asyncio.sleep(delay_seconds)
+def get_or_create_session(user_id: int, chat_id: int) -> dict:
+    """Гарантирует существование сессии для пользователя"""
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "dir": tempfile.mkdtemp(prefix=f"courier_{user_id}_"),
+            "photos": [],
+            "cleanup_messages": [],
+            "chat_id": chat_id,
+            "status_msg_id": None,
+            "notify_task": None,
+            "bank_data": {},
+            "contract_date": get_default_contract_date(),
+            "extracted_data": None,
+            "cleanup_task": None
+        }
+    return user_sessions[user_id]
+
+async def trigger_cleanup_job(user_id: int, delay: int):
+    """Задача автоудаления всех фото, файлов и сообщений через 3 минуты (180 сек)"""
+    await asyncio.sleep(delay)
     session = user_sessions.get(user_id)
     if not session:
         return
-
+        
+    messages_to_delete = session.get("cleanup_messages", [])
     session_dir = session.get("dir")
-    messages_to_delete = list(session.get("cleanup_messages", []))
     chat_id = session.get("chat_id")
     
-    # 1. Удаление фото и отправленных Word файлов из чата Telegram
-    for c_id, msg_id in messages_to_delete:
+    # 1. Удаление сообщений (фото, файлов docx) из чата Telegram
+    for c_id, m_id in messages_to_delete:
         try:
-            await bot.delete_message(chat_id=c_id, message_id=msg_id)
+            await bot.delete_message(chat_id=c_id, message_id=m_id)
         except Exception:
             pass
 
@@ -221,23 +229,14 @@ async def cmd_start(message: types.Message, state: FSMContext):
         if old_task and not old_task.done():
             old_task.cancel()
         shutil.rmtree(user_sessions[user_id]["dir"], ignore_errors=True)
+        del user_sessions[user_id]
         
-    user_sessions[user_id] = {
-        "dir": tempfile.mkdtemp(prefix=f"courier_{user_id}_"),
-        "photos": [],
-        "cleanup_messages": [],
-        "chat_id": message.chat.id,
-        "status_msg_id": None,
-        "notify_task": None,
-        "bank_data": {},
-        "contract_date": get_default_contract_date(),
-        "extracted_data": None,
-        "cleanup_task": None
-    }
+    get_or_create_session(user_id, message.chat.id)
     await state.set_state(FormStates.waiting_for_docs)
+    
     await message.answer(
         "👋 **Бот для автозаполнения договоров ГПХ и согласий на ПД курьеров**\n\n"
-        "📸 **Отправьте документы курьера:**\n"
+        "📸 **Отправьте фотографии документов курьера:**\n"
         "1. Паспорт (разворот с фото)\n"
         "2. Основание для работы (ВНЖ / Патент / РВП)\n"
         "3. Штамп регистрации (или бланк миграционного учёта)\n"
@@ -250,38 +249,35 @@ async def cmd_start(message: types.Message, state: FSMContext):
     )
 
 async def update_upload_status_message(chat_id: int, user_id: int):
-    """Дебаунс: отправляет ровно одно компактное сообщение при загрузке альбома фото"""
-    await asyncio.sleep(1.0)
+    """Дебаунс: отправляет ровно одно свежее сообщение при загрузке фото курьера"""
+    await asyncio.sleep(1.2)
     session = user_sessions.get(user_id)
     if not session:
         return
         
-    count = len(session["photos"])
+    count = len(session.get("photos", []))
     if count == 0:
         return
         
     text = (
-        f"📸 **Принято фото: {count} шт.**\n\n"
+        f"📸 **Принято фото документов: {count} шт.**\n\n"
         f"Можете отправить ещё документы/реквизиты или нажать кнопку ниже 👇"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"⚡ Запустить распознавание ({count} фото)", callback_data="process_photos")]
+        [InlineKeyboardButton(text=f"⚡ Запустить распознавание ({count} фото)", callback_data="process_photos")],
+        [InlineKeyboardButton(text="🗑 Очистить фото и начать заново", callback_data="clear_photos")]
     ])
     
-    status_msg_id = session.get("status_msg_id")
-    if status_msg_id:
+    # Удаляем старое статусное сообщение, если оно было выше в чате
+    old_status_id = session.get("status_msg_id")
+    if old_status_id:
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_msg_id,
-                text=text,
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
-            return
+            await bot.delete_message(chat_id=chat_id, message_id=old_status_id)
         except Exception:
             pass
+        session["status_msg_id"] = None
             
+    # ВСЕГДА отправляем НОВОЕ сообщение в самый низ чата — прямо перед глазами пользователя!
     sent_msg = await bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -291,25 +287,13 @@ async def update_upload_status_message(chat_id: int, user_id: int):
     session["status_msg_id"] = sent_msg.message_id
     session["cleanup_messages"].append((chat_id, sent_msg.message_id))
 
-@dp.message(FormStates.waiting_for_docs, F.photo)
+@dp.message(F.photo)
 async def handle_photo(message: types.Message, state: FSMContext):
+    """Прием фотографий в ЛЮБОМ состоянии (без игнорирования)"""
     user_id = message.from_user.id
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {
-            "dir": tempfile.mkdtemp(prefix=f"courier_{user_id}_"),
-            "photos": [],
-            "cleanup_messages": [],
-            "chat_id": message.chat.id,
-            "status_msg_id": None,
-            "notify_task": None,
-            "bank_data": {},
-            "contract_date": get_default_contract_date(),
-            "extracted_data": None,
-            "cleanup_task": None
-        }
-    
-    session = user_sessions[user_id]
+    session = get_or_create_session(user_id, message.chat.id)
     session["chat_id"] = message.chat.id
+    await state.set_state(FormStates.waiting_for_docs)
     
     try:
         photo = message.photo[-1]
@@ -321,38 +305,104 @@ async def handle_photo(message: types.Message, state: FSMContext):
         session["cleanup_messages"].append((message.chat.id, message.message_id))
     except Exception as e:
         logger.error(f"Ошибка загрузки фото: {e}")
-        await message.answer("⚠️ Ошибка при загрузке одного из файлов. Попробуйте отправить его повторно.")
+        await message.answer("⚠️ Ошибка при загрузке фото. Попробуйте отправить его повторно.")
         return
 
-    # Запускаем 3-минутный таймер автоудаления
+    # Запускаем / сбрасываем 3-минутный таймер автоудаления
     start_or_reset_cleanup_timer(user_id)
     
-    # Схлопываем уведомления в ОДНО сообщение
+    # Схлопываем уведомления в ОДНО сообщение через дебаунс
     old_task = session.get("notify_task")
     if old_task and not old_task.done():
         old_task.cancel()
     session["notify_task"] = asyncio.create_task(update_upload_status_message(message.chat.id, user_id))
 
-@dp.message(FormStates.waiting_for_docs, F.text)
-async def handle_text_during_upload(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {
-            "dir": tempfile.mkdtemp(prefix=f"courier_{user_id}_"),
-            "photos": [],
-            "cleanup_messages": [],
-            "chat_id": message.chat.id,
-            "status_msg_id": None,
-            "notify_task": None,
-            "bank_data": {},
-            "contract_date": get_default_contract_date(),
-            "extracted_data": None,
-            "cleanup_task": None
-        }
+@dp.message(F.document)
+async def handle_document(message: types.Message, state: FSMContext):
+    """Прием документов курьера, отправленных как файл без сжатия (JPG, PNG, WEBP)"""
+    doc = message.document
+    mime = (doc.mime_type or "").lower()
+    fname = (doc.file_name or "").lower()
     
+    is_img = mime.startswith("image/") or fname.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp"))
+    if not is_img:
+        await message.answer("⚠️ Пожалуйста, отправляйте документы курьера как **фотографии** (JPG, PNG).")
+        return
+        
+    user_id = message.from_user.id
+    session = get_or_create_session(user_id, message.chat.id)
+    session["chat_id"] = message.chat.id
+    await state.set_state(FormStates.waiting_for_docs)
+    
+    try:
+        file_info = await bot.get_file(doc.file_id)
+        ext = os.path.splitext(doc.file_name)[1] if doc.file_name else ".jpg"
+        save_path = os.path.join(session["dir"], f"doc_{len(session['photos']) + 1}{ext}")
+        await bot.download_file(file_info.file_path, save_path)
+        
+        session["photos"].append(save_path)
+        session["cleanup_messages"].append((message.chat.id, message.message_id))
+    except Exception as e:
+        logger.error(f"Ошибка загрузки файла документа: {e}")
+        await message.answer("⚠️ Ошибка при загрузке файла. Попробуйте отправить повторно.")
+        return
+
+    start_or_reset_cleanup_timer(user_id)
+    old_task = session.get("notify_task")
+    if old_task and not old_task.done():
+        old_task.cancel()
+    session["notify_task"] = asyncio.create_task(update_upload_status_message(message.chat.id, user_id))
+
+@dp.callback_query(F.data == "clear_photos")
+async def clear_photos_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Очистка загруженных фото для начала заново"""
+    user_id = callback.from_user.id
+    session = user_sessions.get(user_id)
+    if session:
+        session["photos"] = []
+        session["status_msg_id"] = None
+        if os.path.exists(session["dir"]):
+            for f in os.listdir(session["dir"]):
+                try:
+                    os.remove(os.path.join(session["dir"], f))
+                except Exception:
+                    pass
+    await state.set_state(FormStates.waiting_for_docs)
+    await callback.message.edit_text(
+        "🗑 **Список фото очищен.**\n\n"
+        "📸 Отправьте новые фотографии документов курьера (паспорт, патент/ВНЖ, регистрация, реквизиты):"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "add_more_photos")
+async def add_more_photos_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Разрешение на догрузку дополнительных фото"""
+    await state.set_state(FormStates.waiting_for_docs)
+    session = user_sessions.get(callback.from_user.id)
+    if session:
+        session["status_msg_id"] = None
+    await callback.message.answer("📸 Отправьте дополнительные фотографии документов прямо в чат:")
+    await callback.answer()
+
+@dp.message(F.text)
+async def handle_text_general(message: types.Message, state: FSMContext):
+    """Универсальная обработка текстовых сообщений (реквизиты, редактирование, команды)"""
+    curr_state = await state.get_state()
+    
+    # Если пользователь редактирует конкретное поле
+    if curr_state == FormStates.edit_field.state:
+        await process_edited_field(message, state)
+        return
+        
+    user_id = message.from_user.id
+    session = get_or_create_session(user_id, message.chat.id)
+    
+    # Проверка на банковские реквизиты в тексте
     bank_parsed = parse_bank_text(message.text)
     if bank_parsed:
-        user_sessions[user_id]["bank_data"].update(bank_parsed)
+        session["bank_data"].update(bank_parsed)
+        if session.get("extracted_data"):
+            session["extracted_data"].update(bank_parsed)
         bik = bank_parsed.get("bik", "не найден")
         rs = bank_parsed.get("rs", "не найден")
         ks = bank_parsed.get("ks", "не найден")
@@ -364,16 +414,19 @@ async def handle_text_during_upload(message: types.Message, state: FSMContext):
             f"Они будут автоматически подставлены в договор!",
             parse_mode="Markdown"
         )
-        user_sessions[user_id]["cleanup_messages"].append((msg.chat.id, msg.message_id))
+        session["cleanup_messages"].append((msg.chat.id, msg.message_id))
     else:
-        await message.answer("📝 Текст сохранен. Загрузите фото документов.")
+        if curr_state == FormStates.confirm_data.state:
+            await message.answer("ℹ️ Вы находитесь на этапе проверки данных. Воспользуйтесь кнопками под карточкой курьера выше или отправьте /start.")
+        else:
+            await message.answer("📝 Текст принят. Загрузите фото документов курьера или отправьте /start.")
 
 @dp.callback_query(F.data == "process_photos")
 async def process_photos_callback(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     session = user_sessions.get(user_id)
     if not session or not session.get("photos"):
-        await callback.message.answer("⚠️ Сначала загрузите хотя бы 1 фото документа.")
+        await callback.message.answer("⚠️ Сначала загрузите хотя бы 1 фото документа курьера.")
         await callback.answer()
         return
 
@@ -404,7 +457,21 @@ async def process_photos_callback(callback: types.CallbackQuery, state: FSMConte
         session["cleanup_messages"].append((summary_msg.chat.id, summary_msg.message_id))
     except Exception as e:
         logger.exception("Extraction error")
-        await msg.edit_text(f"❌ Ошибка распознавания:\n{e}\n\nПопробуйте прислать фото повторно.")
+        session["status_msg_id"] = None
+        await state.set_state(FormStates.waiting_for_docs)
+        
+        err_msg = str(e)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Повторить попытку", callback_data="process_photos")],
+            [InlineKeyboardButton(text="🗑 Очистить фото и загрузить заново", callback_data="clear_photos")]
+        ])
+        
+        await msg.edit_text(
+            f"❌ **Ошибка распознавания:**\n`{err_msg}`\n\n"
+            f"📸 Нажмите **«Повторить попытку»** или **«Очистить фото»**, либо отправьте дополнительные фото прямо в чат.",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
 
 @dp.callback_query(F.data.startswith("edit_"))
 async def handle_edit_field_click(callback: types.CallbackQuery, state: FSMContext):
@@ -423,7 +490,6 @@ async def handle_edit_field_click(callback: types.CallbackQuery, state: FSMConte
     await callback.message.answer(f"✏️ {prompt}")
     await callback.answer()
 
-@dp.message(FormStates.edit_field, F.text)
 async def process_edited_field(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     session = user_sessions.get(user_id)
@@ -494,7 +560,7 @@ async def generate_contract_callback(callback: types.CallbackQuery, state: FSMCo
                 f"Заполнены: шапка, срок (+6 мес.), п.5, полная таблица реквизитов и подпись.",
         parse_mode="Markdown"
     )
-    # ВАЖНО: Добавляем отправленный файл в список на автоудаление через 3 мин!
+    # Добавляем отправленный файл Word в список на автоудаление через 3 мин!
     session["cleanup_messages"].append((msg_contract.chat.id, msg_contract.message_id))
 
     # Отправка 2: Согласие на обработку ПД
@@ -505,7 +571,7 @@ async def generate_contract_callback(callback: types.CallbackQuery, state: FSMCo
                 f"Заполнены: ФИО, паспорт, адрес регистрации и строка подписи с датой.",
         parse_mode="Markdown"
     )
-    # ВАЖНО: Добавляем отправленный файл в список на автоудаление через 3 мин!
+    # Добавляем отправленный файл Word в список на автоудаление через 3 мин!
     session["cleanup_messages"].append((msg_pd.chat.id, msg_pd.message_id))
 
     msg_notice = await callback.message.answer(
@@ -528,7 +594,7 @@ async def reset_session_callback(callback: types.CallbackQuery, state: FSMContex
         shutil.rmtree(session["dir"], ignore_errors=True)
         del user_sessions[user_id]
     await state.clear()
-    await callback.message.answer("🔄 Данные очищены. Чтобы начать заново, отправьте /start")
+    await callback.message.answer("🔄 Данные очищены. Чтобы начать заново, отправьте /start или пришлите новые фото.")
     await callback.answer()
 
 async def main():
