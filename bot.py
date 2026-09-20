@@ -23,7 +23,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from extractor import extract_data_from_images
-from contract_filler import fill_gpd_contract, fill_pd_consent, get_russian_date, add_six_months, make_fio_initials
+from contract_filler import fill_gpd_contract, fill_pd_consent, fill_combined_document, get_russian_date, add_six_months, make_fio_initials
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip().strip('"').strip("'")
@@ -631,47 +631,84 @@ async def generate_contract_callback(callback: types.CallbackQuery, state: FSMCo
     fio_clean = (data.get("fio") or "Курьер").strip().replace(" ", "_")
     session_dir = session["dir"]
 
-    # 1. Формирование договора ГПХ
+    # 1. Формирование единого файла: Договор ГПХ + Согласие ПД для удобной печати
+    combined_name = f"Договор_ГПХ_и_Согласие_ПД_{fio_clean}.docx"
+    combined_path = os.path.join(session_dir, combined_name)
+    fill_combined_document(TEMPLATE_CONTRACT_PATH, TEMPLATE_PD_PATH, combined_path, data)
+
+    # 2. Также формируем отдельные файлы на случай, если понадобятся раздельно
     contract_name = f"Договор_ГПХ_{fio_clean}.docx"
     contract_path = os.path.join(session_dir, contract_name)
     fill_gpd_contract(TEMPLATE_CONTRACT_PATH, contract_path, data)
 
-    # 2. Формирование согласия на обработку ПД
     pd_name = f"Согласие_на_обработку_ПД_{fio_clean}.docx"
     pd_path = os.path.join(session_dir, pd_name)
     fill_pd_consent(TEMPLATE_PD_PATH, pd_path, data)
 
-    # Отправка 1: Договор ГПХ
-    doc_contract = FSInputFile(contract_path, filename=contract_name)
-    msg_contract = await callback.message.answer_document(
-        document=doc_contract,
-        caption=f"📄 <b>1. Договор ГПХ</b> для курьера: <b>{html.escape(data.get('fio', 'Курьер'))}</b>\n"
-                f"Заполнены: шапка, срок (+6 мес.), п.5, полная таблица реквизитов и подпись.",
-        parse_mode="HTML"
-    )
-    session["cleanup_messages"].append((msg_contract.chat.id, msg_contract.message_id))
+    session["generated_files"] = {
+        "combined": (combined_path, combined_name),
+        "contract": (contract_path, contract_name),
+        "pd": (pd_path, pd_name)
+    }
 
-    # Отправка 2: Согласие на обработку ПД
-    doc_pd = FSInputFile(pd_path, filename=pd_name)
-    msg_pd = await callback.message.answer_document(
-        document=doc_pd,
-        caption=f"📑 <b>2. Согласие на обработку персональных данных</b>\n"
-                f"Заполнены: ФИО, паспорт, адрес регистрации и строка подписи с датой.",
+    separate_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📑 Скачать отдельно Договор", callback_data="get_file_contract"),
+            InlineKeyboardButton(text="📑 Скачать отдельно Согласие", callback_data="get_file_pd")
+        ]
+    ])
+
+    # Отправка единого готового файла для печати
+    doc_combined = FSInputFile(combined_path, filename=combined_name)
+    msg_combined = await callback.message.answer_document(
+        document=doc_combined,
+        caption=f"📄 <b>Единый файл для печати (Договор ГПХ + Согласие на ПД)</b>\n"
+                f"Курьер: <b>{html.escape(data.get('fio', 'Курьер'))}</b>\n\n"
+                f"🖨️ <b>Готово к распечатке в 1 клик:</b>\n"
+                f"• Стр. 1–6: Договор ГПХ (срок +6 мес., реквизиты, подпись)\n"
+                f"• Стр. 7–8: Согласие на обработку ПД (с разрывом страницы)\n\n"
+                f"<i>Если нужны раздельные файлы, нажмите кнопки ниже:</i>",
+        reply_markup=separate_keyboard,
         parse_mode="HTML"
     )
-    session["cleanup_messages"].append((msg_pd.chat.id, msg_pd.message_id))
+    session["cleanup_messages"].append((msg_combined.chat.id, msg_combined.message_id))
 
     msg_notice = await callback.message.answer(
         "🔒 <b>Безопасность персональных данных курьера (152-ФЗ):</b>\n"
-        "Ровно через <b>3 минуты</b> все загруженные фото и оба сгенерированных файла Word будут <b>автоматически удалены из этого чата</b> и стёрты с сервера.\n\n"
-        "Успейте скачать файлы себе на устройство!\n"
+        "Ровно через <b>3 минуты</b> все загруженные фото и сгенерированные файлы Word будут <b>автоматически удалены из этого чата</b> и стёрты с сервера.\n\n"
+        "Успейте скачать файл себе на устройство!\n"
         "Для следующего курьера отправьте /start",
         parse_mode="HTML"
     )
     session["cleanup_messages"].append((msg_notice.chat.id, msg_notice.message_id))
     
-    # КРИТИЧЕСКИ ВАЖНО: Запускаем честный 3-минутный таймер С МОМЕНТА ВЫДАЧИ ФАЙЛОВ!
+    # КРИТИЧЕСКИ ВАЖНО: Запускаем честный 3-минутный таймер С МОМЕНТА ВЫДАЧИ ФАЙЛА!
     start_or_reset_cleanup_timer(user_id, seconds=AUTO_CLEANUP_SECONDS)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("get_file_"))
+async def get_separate_file_callback(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    session = user_sessions.get(user_id)
+    if not session or not session.get("generated_files"):
+        await callback.answer("⚠️ Файлы уже удалены или сессия истекла.", show_alert=True)
+        return
+
+    ftype = callback.data.replace("get_file_", "")
+    file_info = session["generated_files"].get(ftype)
+    if not file_info or not os.path.exists(file_info[0]):
+        await callback.answer("⚠️ Файл не найден.", show_alert=True)
+        return
+
+    fpath, fname = file_info
+    doc_file = FSInputFile(fpath, filename=fname)
+    title = "Договор ГПХ" if ftype == "contract" else "Согласие на обработку ПД"
+    msg = await callback.message.answer_document(
+        document=doc_file,
+        caption=f"📑 <b>Отдельный файл: {title}</b>",
+        parse_mode="HTML"
+    )
+    session["cleanup_messages"].append((msg.chat.id, msg.message_id))
     await callback.answer()
 
 @dp.callback_query(F.data == "reset_session")

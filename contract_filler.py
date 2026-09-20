@@ -2,6 +2,7 @@ import docx
 from docx.shared import Pt
 import datetime
 import calendar
+import re
 
 MONTHS_RU = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля",
@@ -38,14 +39,8 @@ def make_fio_initials(fio_str: str) -> str:
     initials = "".join([f"{p[0].upper()}." for p in parts[1:]])
     return f"{last_name} {initials}".strip()
 
-def fill_gpd_contract(
-    template_path: str,
-    output_path: str,
-    data: dict
-) -> str:
-    """Заполняет договор ГПХ по шаблону с сохранением форматирования"""
-    doc = docx.Document(template_path)
-    
+def fill_gpd_contract_doc(doc: docx.Document, data: dict):
+    """Заполняет объект Document договора ГПХ"""
     # Дата договора: если не задана вручную, по правилу берём СЕГОДНЯ + 1 ДЕНЬ К КАЛЕНДАРЮ
     if isinstance(data.get("contract_date"), datetime.date):
         dt_start = data["contract_date"]
@@ -165,19 +160,8 @@ def fill_gpd_contract(
             r.font.name = "Times New Roman"
             r.font.size = Pt(11)
 
-    doc.save(output_path)
-    return output_path
-
-
-def fill_pd_consent(
-    template_path: str,
-    output_path: str,
-    data: dict
-) -> str:
-    """Заполняет согласие на обработку персональных данных"""
-    import re
-    doc = docx.Document(template_path)
-    
+def fill_pd_doc(doc: docx.Document, data: dict):
+    """Заполняет объект Document согласия на обработку ПД"""
     fio = data.get("fio", "").strip()
     fio_short = make_fio_initials(fio)
     passport_str = data.get("passport_str", "").strip()
@@ -240,6 +224,49 @@ def fill_pd_consent(
         for r in sig_p.runs:
             r.font.name = "Times New Roman"
             r.font.size = Pt(10)
-            
+
+def append_pd_to_contract(contract_doc: docx.Document, pd_doc: docx.Document):
+    """Добавляет Согласие на обработку ПД в конец договора с разрывом страницы"""
+    contract_doc.add_page_break()
+    for p in pd_doc.paragraphs:
+        new_p = contract_doc.add_paragraph()
+        new_p.alignment = p.alignment
+        new_p.paragraph_format.space_before = p.paragraph_format.space_before
+        new_p.paragraph_format.space_after = p.paragraph_format.space_after
+        new_p.paragraph_format.line_spacing = p.paragraph_format.line_spacing
+        for r in p.runs:
+            new_r = new_p.add_run(r.text)
+            new_r.bold = r.bold
+            new_r.italic = r.italic
+            new_r.underline = r.underline
+            new_r.font.name = r.font.name or "Times New Roman"
+            new_r.font.size = r.font.size or Pt(10)
+
+def fill_gpd_contract(template_path: str, output_path: str, data: dict) -> str:
+    """Заполняет отдельный договор ГПХ"""
+    doc = docx.Document(template_path)
+    fill_gpd_contract_doc(doc, data)
     doc.save(output_path)
+    return output_path
+
+def fill_pd_consent(template_path: str, output_path: str, data: dict) -> str:
+    """Заполняет отдельное согласие на обработку персональных данных"""
+    doc = docx.Document(template_path)
+    fill_pd_doc(doc, data)
+    doc.save(output_path)
+    return output_path
+
+def fill_combined_document(contract_template_path: str, pd_template_path: str, output_path: str, data: dict) -> str:
+    """
+    Создает единый документ: Договор ГПХ + Согласие на обработку ПД (с разрывом страницы).
+    Идеально для пакетной и двухсторонней печати курьера.
+    """
+    doc_contract = docx.Document(contract_template_path)
+    fill_gpd_contract_doc(doc_contract, data)
+    
+    doc_pd = docx.Document(pd_template_path)
+    fill_pd_doc(doc_pd, data)
+    
+    append_pd_to_contract(doc_contract, doc_pd)
+    doc_contract.save(output_path)
     return output_path
