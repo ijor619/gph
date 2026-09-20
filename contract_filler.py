@@ -175,6 +175,7 @@ def fill_pd_consent(
     data: dict
 ) -> str:
     """Заполняет согласие на обработку персональных данных"""
+    import re
     doc = docx.Document(template_path)
     
     fio = data.get("fio", "").strip()
@@ -183,12 +184,10 @@ def fill_pd_consent(
     
     # Нормализация строки паспорта
     if not passport_str.lower().startswith("паспорт"):
-        passport_str = f"паспорт: {passport_str}"
-    else:
-        passport_str = passport_str.replace("паспорт ", "паспорт: ")
+        passport_str = f"паспорт {passport_str}"
         
-    if not passport_str.endswith("г.") and not passport_str.endswith("г"):
-        passport_str = f"{passport_str} г."
+    if re.search(r"\d{4}$", passport_str.strip()):
+        passport_str = f"{passport_str.strip()} г."
         
     reg_address = data.get("reg_address", "").strip()
     
@@ -200,21 +199,44 @@ def fill_pd_consent(
         
     date_str = get_russian_date_pd(dt)
     
-    # 1. P2: Я, ФИО, паспорт: ... выдан ...
-    doc.paragraphs[2].text = f"Я, {fio}, {passport_str} "
+    # 1. P2: Я, ФИО, данные паспорта
+    for p in doc.paragraphs[:5]:
+        if p.text.startswith("Я,"):
+            p.text = f"Я, {fio}, {passport_str}"
+            for r in p.runs:
+                r.font.name = "Times New Roman"
+                r.font.size = Pt(10)
+            break
+            
+    # 2. P3: скрываем подстрочную надпись (кем выдан)
+    for p in doc.paragraphs[:6]:
+        if "(кем выдан)" in p.text:
+            p.text = ""
+            break
     
-    # 2. P4: зарегистрированной(го) по адресу: ...
-    doc.paragraphs[4].text = f"зарегистрированной(го) по адресу: {reg_address}"
+    # 3. P4: адрес регистрации и наименование оператора
+    for p in doc.paragraphs[:10]:
+        if "зарегистрированной(го) по адресу" in p.text:
+            if "____" in p.text:
+                p.text = re.sub(r"_{10,}\s*", f"{reg_address} ", p.text)
+            elif "даю Обществу" in p.text:
+                p.text = f"зарегистрированной(го) по адресу: {reg_address} даю Обществу с ограниченной ответственностью «Барори Парк», (ОГРН 1267800060330, ИНН 7814866176),"
+            else:
+                p.text = f"зарегистрированной(го) по адресу: {reg_address}"
+            for r in p.runs:
+                r.font.name = "Times New Roman"
+                r.font.size = Pt(10)
+            break
     
-    # 3. P62: строка подписи с инициалами и датой подписания
+    # 4. Строка подписи с инициалами и датой подписания
     sig_p = None
     for p in reversed(doc.paragraphs):
-        if "________________________" in p.text or "/________" in p.text or "«" in p.text:
+        if any(k in p.text for k in ["________", "«__»", "сентября", "2026", "«"]):
             sig_p = p
             break
             
     if sig_p:
-        sig_p.text = f"{fio_short}  /________________________/                                                       {date_str}"
+        sig_p.text = f"{fio_short}   /____________/                                                                {date_str}"
         for r in sig_p.runs:
             r.font.name = "Times New Roman"
             r.font.size = Pt(10)

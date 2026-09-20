@@ -88,6 +88,7 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
         
     cleaned = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
     
+    # 1. Попытка стандартного JSON парсинга
     start_idx = cleaned.find("{")
     end_idx = cleaned.rfind("}")
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -105,6 +106,7 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
             except Exception:
                 pass
 
+    # 2. Regex-парсер каждого поля
     data = {}
     fields = [
         "fio", "citizenship", "birth_date", "birth_place", "passport_str", "passport_issue_date",
@@ -157,7 +159,9 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     for img_path in valid_paths:
         try:
             with Image.open(img_path) as img:
+                # 1. Автоповорот фото по метаданным EXIF с камеры смартфона
                 img = ImageOps.exif_transpose(img)
+                # 2. Оптимальное разрешение для четкости мелкого рукописного текста
                 img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
                 from io import BytesIO
                 buf = BytesIO()
@@ -186,6 +190,11 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
         configured_model = ""
 
     if api_key.startswith("sk-or-"):
+        # Быстрые мультимодальные модели OpenRouter:
+        # 1. google/gemma-4-26b-a4b-it:free — MoE (3.8B активных), без долгого thinking, ответ за 5-8 сек.
+        # 2. google/gemma-4-31b-it:free — надежная модель Google
+        # 3. qwen/qwen3.8-27b:free — мощная модель (с заниженным reasoning effort, чтобы не висеть минутами)
+        # 4. inclusionai/ling-3.0-flash-vl:free — легкая VL модель
         models_to_try = [
             "google/gemma-4-26b-a4b-it:free",
             "google/gemma-4-31b-it:free",

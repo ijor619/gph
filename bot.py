@@ -512,56 +512,6 @@ async def process_photos_callback(callback: types.CallbackQuery, state: FSMConte
                 pass
             await callback.message.answer(err_text, reply_markup=keyboard, parse_mode="HTML")
 
-@dp.callback_query(F.data == "check_rkl")
-async def check_rkl_callback(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    session = user_sessions.get(user_id)
-    if not session or not session.get("extracted_data"):
-        await callback.answer("⚠️ Нет данных курьера для проверки.", show_alert=True)
-        return
-
-    data = session["extracted_data"]
-    fio = (data.get("fio") or "—").strip()
-    bdate = (data.get("birth_date") or "—").strip()
-    pass_str = (data.get("passport_str") or "—").strip()
-    
-    # 1. Извлекаем дату выдачи паспорта
-    issue_date = (data.get("passport_issue_date") or "").strip()
-    if not issue_date or issue_date == "—":
-        m_date = re.search(r'\b(\d{2}[./-]\d{2}[./-]\d{4})\b', pass_str)
-        if m_date:
-            issue_date = m_date.group(1).replace('/', '.').replace('-', '.')
-        else:
-            issue_date = "—"
-
-    # 2. Извлекаем серию и номер паспорта (очищаем от даты и лишних слов)
-    s_clean = pass_str
-    if issue_date and issue_date != "—":
-        s_clean = s_clean.replace(issue_date, "")
-    s_clean = re.sub(r'(?i)\b(паспорт|выдан|серия|серии|номер|от|г\.?)\b', '', s_clean)
-    s_clean = re.sub(r'[№,:;]', '', s_clean).strip()
-    s_clean = re.sub(r'\s+', ' ', s_clean).strip()
-    pass_num = s_clean or "—"
-
-    text = (
-        "👮‍♂️ <b>Данные курьера для проверки в Реестре контролируемых лиц (РКЛ МВД):</b>\n\n"
-        "💡 <i>Нажмите на значение в рамке, чтобы скопировать его в 1 клик для вставки на сайт МВД:</i>\n\n"
-        f"• <b>ФИО:</b> <code>{html.escape(fio)}</code>\n"
-        f"• <b>Дата рождения:</b> <code>{html.escape(bdate)}</code>\n"
-        f"• <b>Серия и номер документа:</b> <code>{html.escape(pass_num)}</code>\n"
-        f"• <b>Дата выдачи документа:</b> <code>{html.escape(issue_date)}</code>\n\n"
-        "🌐 <i>Перейдите на официальный сайт МВД России по кнопке ниже:</i>"
-    )
-
-    rkl_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌐 Открыть форму РКЛ на сайте мвд.рф ↗️", url="https://xn--b1aew.xn--p1ai/rkl")],
-        [InlineKeyboardButton(text="✅ Всё проверено, сформировать документы", callback_data="generate_contract")]
-    ])
-
-    msg = await callback.message.answer(text, reply_markup=rkl_keyboard, parse_mode="HTML")
-    session["cleanup_messages"].append((msg.chat.id, msg.message_id))
-    await callback.answer()
-
 @dp.callback_query(F.data.startswith("edit_"))
 async def handle_edit_field_click(callback: types.CallbackQuery, state: FSMContext):
     field_to_edit = callback.data.replace("edit_", "")
@@ -614,6 +564,56 @@ async def process_edited_field(message: types.Message, state: FSMContext):
         session["cleanup_messages"].append((summary_msg.chat.id, summary_msg.message_id))
     else:
         await message.answer("⚠️ Сессия не найдена. Нажмите /start")
+
+@dp.callback_query(F.data == "check_rkl")
+async def check_rkl_callback(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    session = user_sessions.get(user_id)
+    if not session or not session.get("extracted_data"):
+        await callback.answer("⚠️ Нет данных курьера для проверки.", show_alert=True)
+        return
+
+    data = session["extracted_data"]
+    fio = (data.get("fio") or "—").strip()
+    bdate = (data.get("birth_date") or "—").strip()
+    pass_str = (data.get("passport_str") or "—").strip()
+    
+    # 1. Извлекаем дату выдачи паспорта
+    issue_date = (data.get("passport_issue_date") or "").strip()
+    if not issue_date or issue_date == "—":
+        m_date = re.search(r'\b(\d{2}[./-]\d{2}[./-]\d{4})\b', pass_str)
+        if m_date:
+            issue_date = m_date.group(1).replace('/', '.').replace('-', '.')
+        else:
+            issue_date = "—"
+
+    # 2. Извлекаем серию и номер паспорта (очищаем от даты и лишних слов)
+    s_clean = pass_str
+    if issue_date and issue_date != "—":
+        s_clean = s_clean.replace(issue_date, "")
+    s_clean = re.sub(r'(?i)\b(паспорт|выдан|серия|серии|номер|от|г\.?)\b', '', s_clean)
+    s_clean = re.sub(r'[№,:;]', '', s_clean).strip()
+    s_clean = re.sub(r'\s+', ' ', s_clean).strip()
+    pass_num = s_clean or "—"
+
+    text = (
+        "👮‍♂️ <b>Данные курьера для проверки в Реестре контролируемых лиц (РКЛ МВД):</b>\n\n"
+        "💡 <i>Нажмите на значение в рамке, чтобы скопировать его в 1 клик для вставки на сайт МВД:</i>\n\n"
+        f"• <b>ФИО:</b> <code>{html.escape(fio)}</code>\n"
+        f"• <b>Дата рождения:</b> <code>{html.escape(bdate)}</code>\n"
+        f"• <b>Серия и номер документа:</b> <code>{html.escape(pass_num)}</code>\n"
+        f"• <b>Дата выдачи документа:</b> <code>{html.escape(issue_date)}</code>\n\n"
+        "🌐 <i>Перейдите на официальный сайт МВД России по кнопке ниже:</i>"
+    )
+
+    rkl_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Открыть форму РКЛ на сайте мвд.рф ↗️", url="https://xn--b1aew.xn--p1ai/rkl")],
+        [InlineKeyboardButton(text="✅ Всё проверено, сформировать документы", callback_data="generate_contract")]
+    ])
+
+    msg = await callback.message.answer(text, reply_markup=rkl_keyboard, parse_mode="HTML")
+    session["cleanup_messages"].append((msg.chat.id, msg.message_id))
+    await callback.answer()
 
 @dp.callback_query(F.data == "generate_contract")
 async def generate_contract_callback(callback: types.CallbackQuery, state: FSMContext):
