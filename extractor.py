@@ -88,7 +88,6 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
         
     cleaned = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
     
-    # 1. Попытка стандартного JSON парсинга
     start_idx = cleaned.find("{")
     end_idx = cleaned.rfind("}")
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -106,7 +105,6 @@ def parse_json_safely(raw_text: str) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    # 2. Regex-парсер каждого поля
     data = {}
     fields = [
         "fio", "citizenship", "birth_date", "birth_place", "passport_str", "passport_issue_date",
@@ -159,9 +157,7 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     for img_path in valid_paths:
         try:
             with Image.open(img_path) as img:
-                # 1. Автоповорот фото по метаданным EXIF с камеры смартфона
                 img = ImageOps.exif_transpose(img)
-                # 2. Оптимальное разрешение для четкости мелкого рукописного текста
                 img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
                 from io import BytesIO
                 buf = BytesIO()
@@ -185,21 +181,23 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     ]
 
     configured_model = os.getenv("OPENAI_MODEL", "").strip()
-    deprecated_models = ["google/gemini-2.0-flash-exp:free", "openrouter/free", "deepseek/deepseek-r1:free"]
+    deprecated_models = ["google/gemini-2.0-flash-exp:free", "openrouter/free", "deepseek/deepseek-r1:free", "inclusionai/ling-3.0-flash-vl:free"]
     if configured_model in deprecated_models:
         configured_model = ""
 
     if api_key.startswith("sk-or-"):
-        # Быстрые мультимодальные модели OpenRouter:
-        # 1. google/gemma-4-26b-a4b-it:free — MoE (3.8B активных), без долгого thinking, ответ за 5-8 сек.
-        # 2. google/gemma-4-31b-it:free — надежная модель Google
-        # 3. qwen/qwen3.8-27b:free — мощная модель (с заниженным reasoning effort, чтобы не висеть минутами)
-        # 4. inclusionai/ling-3.0-flash-vl:free — легкая VL модель
+        # Мультимодальные модели OpenRouter:
+        # 1. qwen/qwen3.8-27b:free — основная модель распознавания документов (ставим ПЕРВОЙ)
+        # 2. dots-studio/dots-3-note-preview:free — резервная бесплатная модель с поддержкой Vision
+        # 3. thinkingmachines/inkling:free — резервная модель с Vision
+        # 4. google/gemma-4-26b-a4b-it:free — модель Google MoE
+        # 5. google/gemma-4-31b-it:free — модель Google
         models_to_try = [
-            "google/gemma-4-26b-a4b-it:free",
-            "google/gemma-4-31b-it:free",
             "qwen/qwen3.8-27b:free",
-            "inclusionai/ling-3.0-flash-vl:free"
+            "dots-studio/dots-3-note-preview:free",
+            "thinkingmachines/inkling:free",
+            "google/gemma-4-26b-a4b-it:free",
+            "google/gemma-4-31b-it:free"
         ]
         if configured_model and configured_model not in models_to_try:
             models_to_try.insert(0, configured_model)
@@ -212,39 +210,56 @@ def extract_data_from_images(image_paths: List[str], api_key: str = None) -> Dic
     errors = []
 
     for model_name in models_to_try:
-        try:
-            logger.info(f"Trying extraction with model: {model_name}")
-            call_kwargs = {
-                "model": model_name,
-                "messages": messages,
-                "temperature": 0.0,
-                "max_tokens": 2500
-            }
-            if api_key.startswith("sk-or-") and "qwen" in model_name.lower():
-                call_kwargs["extra_body"] = {"reasoning": {"effort": "low"}}
+        logger.info(f"Trying extraction with model: {model_name}")
+        call_kwargs = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0.0,
+            "max_tokens": 2500
+        }
+        if api_key.startswith("sk-or-") and "qwen" in model_name.lower():
+            call_kwargs["extra_body"] = {"reasoning": {"effort": "low"}}
 
+        # До 2 попыток на модель (с авто-ожиданием при кратковременном 429 Rate Limit)
+        for attempt in range(2):
             try:
-                response = client.chat.completions.create(**call_kwargs)
-            except Exception:
-                call_kwargs.pop("extra_body", None)
-                response = client.chat.completions.create(**call_kwargs)
+                try:
+                    response = client.chat.completions.create(**call_kwargs)
+                except Exception as inner_ex:
+                    if "extra_body" in call_kwargs:
+                        call_kwargs.pop("extra_body", None)
+                        response = client.chat.completions.create(**call_kwargs)
+                    else:
+                        raise inner_ex
 
-            msg = response.choices[0].message
-            res_text = getattr(msg, "content", None) or getattr(msg, "reasoning", None) or ""
-            last_raw_response = res_text
-            
-            parsed = parse_json_safely(res_text)
-            if parsed and isinstance(parsed, dict) and any(parsed.values()):
-                logger.info(f"Successfully parsed documents using model: {model_name}")
-                return parsed
-        except Exception as ex:
-            err_msg = f"{model_name}: {str(ex)[:100]}"
-            logger.warning(f"Model attempt failed: {err_msg}")
-            errors.append(err_msg)
-            continue
+                msg = response.choices[0].message
+                res_text = getattr(msg, "content", None) or getattr(msg, "reasoning", None) or ""
+                last_raw_response = res_text
+                
+                parsed = parse_json_safely(res_text)
+                if parsed and isinstance(parsed, dict) and any(parsed.values()):
+                    logger.info(f"Successfully parsed documents using model: {model_name}")
+                    return parsed
+                break
+            except Exception as ex:
+                err_str = str(ex)
+                # Если 429 (Rate limit free-models-per-min), ждем 4 секунды и повторяем попытку
+                if ("429" in err_str or "rate limit" in err_str.lower()) and attempt == 0:
+                    logger.warning(f"Rate limit 429 on {model_name}, waiting 4s before retry...")
+                    import time
+                    time.sleep(4.0)
+                    continue
+                    
+                err_msg = f"{model_name}: {err_str[:90]}"
+                logger.warning(f"Model attempt failed: {err_msg}")
+                errors.append(err_msg)
+                break
 
     if last_raw_response:
         raise ValueError(f"Модель ответила: {last_raw_response[:120]}")
     
+    if any("429" in e for e in errors):
+        raise ValueError("Сервер OpenRouter перегружен (лимит бесплатных запросов в минуту). Пожалуйста, подождите 30–60 секунд и нажмите «🔄 Повторить попытку».")
+
     err_summary = "; ".join(errors[-2:]) if errors else "таймаут ответа сервера"
     raise ValueError(f"Сбой моделей распознавания ({err_summary}).")
